@@ -16,6 +16,7 @@ const { getAuthClient, getSheetsClient } = require('./auth');
 const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
+const { sendErrorsReport } = require('./errorsReport');
 
 const app = express();
 app.use(express.json());
@@ -126,6 +127,8 @@ async function getStatusData(cfg, objectFilter = null) {
     if (type === 'Принят') acceptedNums.add(num);
     if (type === 'Ошибка')  errorNums.add(num);
   });
+  console.log(`[getStatusData] Принят: ${acceptedNums.size} номеров, Ошибка: ${errorNums.size} номеров`);
+  if (acceptedNums.size > 0) console.log('[getStatusData] Пример принятого номера:', [...acceptedNums][0]);
 
   // Группируем «Отправлен» по объекту
   const grouped = {}; // { object: { supplier, orders: [{num, status}] } }
@@ -194,8 +197,26 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
     return;
   }
 
-  let text = `📊 *Статус: ${escMd(objectQuery)}*\n\n`;
-  data.forEach(item => { text += formatObjectStatus(item, true) + '\n'; });
+  let text = `📊 *${escMd(objectQuery)}*\n\n`;
+
+  data.forEach(item => {
+    text += `*${escMd(item.object)}*`;
+    if (item.supplier) text += ` — _${escMd(item.supplier)}_`;
+    text += `\nВсего: ${item.total} | ✅${item.accepted} ❌${item.errors} ⏳${item.notAccepted}\n`;
+
+    // Показываем только непринятые заказы
+    const pending = item.orders.filter(o => o.status !== '✅');
+    if (pending.length > 0 && pending.length <= 30) {
+      pending.forEach(o => {
+        text += `  ${o.status} ${escMd(o.num)}\n`;
+      });
+    }
+
+    if (item.notAccepted === 0 && item.errors === 0) {
+      text += `  ✅ Все оприходованы\n`;
+    }
+    text += '\n';
+  });
 
   await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
@@ -220,10 +241,7 @@ async function handleStatusAllCommand(chatId, threadId, cfg) {
   const errorsAll   = data.reduce((s, i) => s + i.errors, 0);
   const pendingAll  = data.reduce((s, i) => s + i.notAccepted, 0);
 
-  let text = `📊 *Статус по всем объектам*\n`;
-  text += `Всего заказов: ${totalAll} | ✅ ${acceptedAll} | ❌ ${errorsAll} | ⏳ ${pendingAll}\n\n`;
-
-  // Группируем по поставщику для удобства
+  // Группируем по поставщику
   const bySupplier = {};
   data.forEach(item => {
     const key = item.supplier || 'Без поставщика';
@@ -231,18 +249,41 @@ async function handleStatusAllCommand(chatId, threadId, cfg) {
     bySupplier[key].push(item);
   });
 
-  for (const [supplier, items] of Object.entries(bySupplier)) {
-    text += `*${escMd(supplier)}*\n`;
-    items.forEach(item => {
-      text += `  ${escMd(item.object)}: ✅${item.accepted} ❌${item.errors} ⏳${item.notAccepted}\n`;
-    });
-    text += '\n';
+  let text = `📊 *Не принятые заказы*\n`;
+  text += `Всего: ${totalAll} | ✅ ${acceptedAll} | ❌ ${errorsAll} | ⏳ ${pendingAll}\n`;
 
-    // Если сообщение слишком длинное — отправляем порциями
+  for (const [supplier, items] of Object.entries(bySupplier)) {
+    // Объекты у которых есть непринятые или ошибки
+    const problemItems = items.filter(i => i.notAccepted > 0 || i.errors > 0);
+
+    // Если все объекты поставщика приняты — пропускаем его
+    if (problemItems.length === 0) continue;
+
+    const supTotal    = items.reduce((s, i) => s + i.total, 0);
+    const supAccepted = items.reduce((s, i) => s + i.accepted, 0);
+    const supErrors   = items.reduce((s, i) => s + i.errors, 0);
+    const supPending  = items.reduce((s, i) => s + i.notAccepted, 0);
+
+    text += `\n*${escMd(supplier)}*`;
+    text += ` (${supTotal} зак. | ✅${supAccepted} ❌${supErrors} ⏳${supPending})\n`;
+
+    // Список непринятых объектов
+    problemItems.forEach(item => {
+      let line = `  • ${escMd(item.object)}`;
+      if (item.errors > 0)      line += ` ❌${item.errors}`;
+      if (item.notAccepted > 0) line += ` ⏳${item.notAccepted}`;
+      text += line + '\n';
+    });
+
     if (text.length > 3500) {
       await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
       text = '';
     }
+  }
+
+  // Если все приняты
+  if (pendingAll === 0 && errorsAll === 0) {
+    text += '\n✅ Все заказы оприходованы!';
   }
 
   if (text.trim()) {
@@ -289,6 +330,14 @@ app.post('/webhook', async (req, res) => {
       const chatId = msg.chat.id;
       // Берём thread_id из входящего сообщения — отвечаем в тот же топик
       const replyThreadId = msg.message_thread_id || null;
+
+      // /errors — Excel с ошибками регистрации
+      if (text === '/errors') {
+        console.log(`[channelBot] Команда /errors от ${chatId} thread:${replyThreadId}`);
+        await sendTyping(cfg, chatId, replyThreadId);
+        await sendErrorsReport(chatId, replyThreadId, cfg);
+        return;
+      }
 
       // /status_all
       if (text === '/status_all' || text.startsWith('/status_all ')) {
