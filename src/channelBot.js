@@ -1,120 +1,65 @@
 /**
  * channelBot.js
  *
- * Webhook-сервер для приёма сообщений из Telegram-канала @AcceptODChannel.
- * Парсит два типа сообщений и пишет в лист «Принят».
+ * Webhook-сервер для:
+ *  1. Приёма сообщений из канала @AcceptODChannel → запись в лист «Принят»
+ *  2. Команд от пользователей в личку боту:
+ *       /status <объект>  — статистика по конкретному объекту
+ *       /status_all       — статистика по всем объектам
  *
- * ✅ ПРИНЯТ:
- * "Заказ принят!Заказ #202600-96-4654 ИП Власенко И.Ю. (поставка 30-05-2026)
- *  в ресторане DP Железнодорожная-02 был оприходован на склад"
- *
- * ❌ ОШИБКА (дата после слова "ошибкой"):
- * "Ошибка регистрации накладной!Регистрация накладной для заказа #20260-361-4794
- *  Скай ООО (RedBull) в ресторане OD Нахабино завершилась ошибкой (поставка 26-05-2026)"
- *
- * Колонки листа «Принят» (A–I):
- *   A  Дата записи       — когда пришло сообщение
- *   B  Поставщик         — ИП Власенко И.Ю.
- *   C  Номер заказа      — #202600-96-4654
- *   D  Тип               — Принят / Ошибка
- *   E  Дата поставки     — 30-05-2026
- *   F  Объект            — DP Железнодорожная-02 (без ФГ/ДР)
- *   G  Сырое сообщение   — полный текст для отладки
- *   H  (пусто)
- *   I  Статус проверки   — заполняет checkStatus.js
+ * Колонки «Отправлен» (B=Объект, C=Номер, E=Поставщик, F=Дата, K=Статус приёмки, L=Архив)
+ * Колонки «Принят»    (C=Номер, D=Тип, F=Объект)
  */
 
 const express = require('express');
 const { getAuthClient, getSheetsClient } = require('./auth');
 const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
+const { sendMessage } = require('./telegram');
 
 const app = express();
 app.use(express.json());
 
-// ── Regex-паттерны ────────────────────────────────────────────────────────────
+// ── Regex для парсинга сообщений канала ───────────────────────────────────────
 
-// Принят: дата перед рестораном
 const RE_ACCEPTED = /Заказ\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+был\s+оприходован/i;
+const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
+const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой/i;
 
-// Ошибка вариант A: дата ПОСЛЕ "ошибкой" — реальный формат канала
-const RE_ERROR_A = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
-
-// Ошибка вариант B: дата ДО ресторана — запасной вариант
-const RE_ERROR_B = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой/i;
-
-/** Убирает суффиксы ФГ, ДР и т.п. в конце названия объекта */
 function cleanObjectName(name) {
   return (name || '').replace(/\s+(ФГ|ДР|DR|DP|GSW)\s*$/i, '').trim();
 }
 
-/**
- * Парсит текст сообщения из канала.
- * Возвращает { type, orderNumber, supplier, deliveryDate, object } или null.
- */
 function parseChannelMessage(text) {
   if (!text) return null;
-
-  // Нормализуем переносы строк
   const s = text.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
 
-  // --- Принят ---
   let m = s.match(RE_ACCEPTED);
-  if (m) {
-    return {
-      type:         'Принят',
-      orderNumber:  m[1].trim(),
-      supplier:     m[2].trim(),
-      deliveryDate: m[3].trim(),
-      object:       cleanObjectName(m[4]),
-    };
-  }
+  if (m) return { type: 'Принят',  orderNumber: m[1].trim(), supplier: m[2].trim(), deliveryDate: m[3].trim(), object: cleanObjectName(m[4]) };
 
-  // --- Ошибка A: дата после "ошибкой" ---
   m = s.match(RE_ERROR_A);
-  if (m) {
-    return {
-      type:         'Ошибка',
-      orderNumber:  m[1].trim(),
-      supplier:     m[2].trim(),
-      object:       cleanObjectName(m[3]),
-      deliveryDate: m[4].trim(),
-    };
-  }
+  if (m) return { type: 'Ошибка',  orderNumber: m[1].trim(), supplier: m[2].trim(), object: cleanObjectName(m[3]), deliveryDate: m[4].trim() };
 
-  // --- Ошибка B: дата перед рестораном ---
   m = s.match(RE_ERROR_B);
-  if (m) {
-    return {
-      type:         'Ошибка',
-      orderNumber:  m[1].trim(),
-      supplier:     m[2].trim(),
-      deliveryDate: m[3].trim(),
-      object:       cleanObjectName(m[4]),
-    };
-  }
+  if (m) return { type: 'Ошибка',  orderNumber: m[1].trim(), supplier: m[2].trim(), deliveryDate: m[3].trim(), object: cleanObjectName(m[4]) };
 
   return null;
 }
 
-/**
- * Записывает одну строку в лист «Принят»
- */
+// ── Запись в лист «Принят» ────────────────────────────────────────────────────
+
 async function writeToSheet(parsed, rawText, cfg) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SHEET_NAME     = cfg.SHEET_ACCEPTED || 'Принят';
 
-  const HEADERS = [
+  await ensureSheetExists(SHEET_NAME, [
     'Дата записи', 'Поставщик', 'Номер заказа', 'Тип',
     'Дата поставки', 'Объект', 'Сырое сообщение', '', 'Статус проверки',
-  ];
-
-  await ensureSheetExists(SHEET_NAME, HEADERS);
+  ]);
 
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
 
-  // Найти последнюю заполненную строку по колонке C (Номер заказа)
   const colC = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!C:C`,
@@ -122,10 +67,7 @@ async function writeToSheet(parsed, rawText, cfg) {
   const colValues = colC.data.values || [];
   let lastRow = 1;
   for (let i = colValues.length - 1; i >= 0; i--) {
-    if (colValues[i][0] && colValues[i][0].toString().trim()) {
-      lastRow = i + 1;
-      break;
-    }
+    if (colValues[i][0] && colValues[i][0].toString().trim()) { lastRow = i + 1; break; }
   }
 
   const now = new Date().toLocaleString('ru-RU', {
@@ -134,36 +76,238 @@ async function writeToSheet(parsed, rawText, cfg) {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 
-  const row = [
-    now,                        // A — Дата записи
-    parsed.supplier,            // B — Поставщик
-    parsed.orderNumber,         // C — Номер заказа
-    parsed.type,                // D — Тип
-    parsed.deliveryDate,        // E — Дата поставки
-    parsed.object,              // F — Объект
-    rawText.substring(0, 500),  // G — Сырое сообщение
-    '',                         // H — пусто
-    '',                         // I — Статус проверки (заполнит checkStatus)
-  ];
-
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!A${lastRow + 1}`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [row] },
+    requestBody: { values: [[
+      now, parsed.supplier, parsed.orderNumber, parsed.type,
+      parsed.deliveryDate, parsed.object, rawText.substring(0, 500), '', '',
+    ]] },
   });
 
   console.log(`[channelBot] ✓ ${parsed.type} | ${parsed.orderNumber} | ${parsed.object} | ${parsed.supplier}`);
 }
 
+// ── Команды /status и /status_all ─────────────────────────────────────────────
+
+/**
+ * Читает лист «Отправлен» и возвращает статистику по объектам.
+ * Если objectFilter задан — только по нему, иначе по всем.
+ *
+ * Возвращает массив:
+ * [{ object, supplier, total, accepted, errors, notAccepted, orderNums[] }]
+ */
+async function getStatusData(cfg, objectFilter = null) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
+  const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+
+  const [sentRes, accRes] = await Promise.all([
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:L` }),
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_ACC}'!A2:I` }),
+  ]);
+
+  const sentRows = sentRes.data.values || [];
+  const accRows  = accRes.data.values  || [];
+
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
+
+  // Индекс принятых по номеру заказа
+  const acceptedNums = new Set();
+  const errorNums    = new Set();
+  accRows.forEach(r => {
+    const num  = norm(r[2]);  // C — Номер заказа
+    const type = (r[3] || '').toString().trim(); // D — Тип
+    if (!num) return;
+    if (type === 'Принят') acceptedNums.add(num);
+    if (type === 'Ошибка')  errorNums.add(num);
+  });
+
+  // Группируем «Отправлен» по объекту
+  const grouped = {}; // { object: { supplier, orders: [{num, status}] } }
+
+  for (const row of sentRows) {
+    const obj      = cleanObjectName((row[1] || '').toString().trim()); // B
+    const num      = norm(row[2]);  // C — Номер заказа
+    const supplier = (row[4] || '').toString().trim(); // E
+    const archive  = (row[11] || '').toString().trim(); // L
+
+    if (!obj || !num) continue;
+    if (archive.startsWith('Архив')) continue;
+
+    // Фильтр по объекту если задан
+    if (objectFilter) {
+      const filterNorm = norm(objectFilter);
+      if (!norm(obj).includes(filterNorm)) continue;
+    }
+
+    if (!grouped[obj]) grouped[obj] = { supplier, orders: [] };
+
+    let status;
+    if (acceptedNums.has(num))    status = '✅';
+    else if (errorNums.has(num))  status = '❌';
+    else                          status = '⏳';
+
+    grouped[obj].orders.push({ num: row[2], status });
+  }
+
+  // Формируем итог
+  return Object.entries(grouped).map(([object, { supplier, orders }]) => {
+    const accepted    = orders.filter(o => o.status === '✅').length;
+    const errors      = orders.filter(o => o.status === '❌').length;
+    const notAccepted = orders.filter(o => o.status === '⏳').length;
+    return { object, supplier, total: orders.length, accepted, errors, notAccepted, orders };
+  });
+}
+
+/**
+ * Форматирует один объект в текст для Telegram
+ */
+function formatObjectStatus(item, detailed = false) {
+  let text = `*${escMd(item.object)}*\n`;
+  if (item.supplier) text += `_${escMd(item.supplier)}_\n`;
+  text += `Всего: ${item.total} | ✅ ${item.accepted} | ❌ ${item.errors} | ⏳ ${item.notAccepted}\n`;
+
+  if (detailed && item.orders.length <= 20) {
+    item.orders.forEach(o => {
+      text += `  ${o.status} ${escMd(o.num)}\n`;
+    });
+  }
+  return text;
+}
+
+/**
+ * Обрабатывает команду /status <объект>
+ */
+async function handleStatusCommand(chatId, objectQuery, cfg) {
+  await sendTyping(cfg, chatId);
+
+  const data = await getStatusData(cfg, objectQuery);
+
+  if (data.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      `Объект *${escMd(objectQuery)}* не найден в таблице\\.`, null, 0);
+    return;
+  }
+
+  let text = `📊 *Статус: ${escMd(objectQuery)}*\n\n`;
+  data.forEach(item => { text += formatObjectStatus(item, true) + '\n'; });
+
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+}
+
+/**
+ * Обрабатывает команду /status_all
+ */
+async function handleStatusAllCommand(chatId, cfg) {
+  await sendTyping(cfg, chatId);
+
+  const data = await getStatusData(cfg, null);
+
+  if (data.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      'Нет данных в листе «Отправлен»\\.', null, 0);
+    return;
+  }
+
+  // Суммарная статистика
+  const totalAll    = data.reduce((s, i) => s + i.total, 0);
+  const acceptedAll = data.reduce((s, i) => s + i.accepted, 0);
+  const errorsAll   = data.reduce((s, i) => s + i.errors, 0);
+  const pendingAll  = data.reduce((s, i) => s + i.notAccepted, 0);
+
+  let text = `📊 *Статус по всем объектам*\n`;
+  text += `Всего заказов: ${totalAll} | ✅ ${acceptedAll} | ❌ ${errorsAll} | ⏳ ${pendingAll}\n\n`;
+
+  // Группируем по поставщику для удобства
+  const bySupplier = {};
+  data.forEach(item => {
+    const key = item.supplier || 'Без поставщика';
+    if (!bySupplier[key]) bySupplier[key] = [];
+    bySupplier[key].push(item);
+  });
+
+  for (const [supplier, items] of Object.entries(bySupplier)) {
+    text += `*${escMd(supplier)}*\n`;
+    items.forEach(item => {
+      text += `  ${escMd(item.object)}: ✅${item.accepted} ❌${item.errors} ⏳${item.notAccepted}\n`;
+    });
+    text += '\n';
+
+    // Если сообщение слишком длинное — отправляем порциями
+    if (text.length > 3500) {
+      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+      text = '';
+    }
+  }
+
+  if (text.trim()) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+  }
+}
+
+// Отправляет "печатает..." в чат
+async function sendTyping(cfg, chatId) {
+  const https = require('https');
+  const body = JSON.stringify({ chat_id: chatId, action: 'typing' });
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path: `/bot${cfg.TELEGRAM_TOKEN}/sendChatAction`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, res => { res.resume(); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.write(body); req.end();
+  });
+}
+
+function escMd(s) {
+  return (s || '').toString().replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+}
+
 // ── Webhook endpoint ──────────────────────────────────────────────────────────
 
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // отвечаем сразу — Telegram не будет повторять
+  res.sendStatus(200);
 
   try {
     const update = req.body;
-    const msg = update.channel_post || update.message;
+    const cfg    = await getConfig();
+
+    // ── Личные сообщения / команды ────────────────────────────────────────
+    if (update.message) {
+      const msg    = update.message;
+      const text   = (msg.text || '').trim();
+      const chatId = msg.chat.id;
+
+      // /status_all
+      if (text === '/status_all' || text.startsWith('/status_all ')) {
+        console.log(`[channelBot] Команда /status_all от ${chatId}`);
+        await handleStatusAllCommand(chatId, cfg);
+        return;
+      }
+
+      // /status <объект>
+      if (text.startsWith('/status')) {
+        const query = text.replace(/^\/status\s*/i, '').trim();
+        if (!query) {
+          await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+            'Укажите объект: `/status OD Нахабино`\nИли все: `/status_all`', null, 0);
+          return;
+        }
+        console.log(`[channelBot] Команда /status "${query}" от ${chatId}`);
+        await handleStatusCommand(chatId, query, cfg);
+        return;
+      }
+    }
+
+    // ── Сообщения из канала ───────────────────────────────────────────────
+    const msg = update.channel_post;
     if (!msg) return;
 
     const text = msg.text || msg.caption || '';
@@ -175,7 +319,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    const cfg = await getConfig();
     await writeToSheet(parsed, text, cfg);
 
   } catch (err) {
@@ -187,14 +330,23 @@ app.post('/webhook', async (req, res) => {
 app.get('/health', (req, res) =>
   res.json({ status: 'ok', ts: new Date().toISOString() }));
 
-// ── Регистрация webhook в Telegram ───────────────────────────────────────────
+// ── Регистрация webhook ───────────────────────────────────────────────────────
 
 async function registerWebhook(token, webhookUrl) {
   const https = require('https');
-  const url = `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
+  // Разрешаем и channel_post и message (для команд)
+  const body = JSON.stringify({
+    url: webhookUrl,
+    allowed_updates: ['channel_post', 'message'],
+  });
 
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path: `/bot${token}/setWebhook`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
@@ -203,7 +355,9 @@ async function registerWebhook(token, webhookUrl) {
         else      console.error(`[channelBot] Ошибка webhook: ${r.description}`);
         resolve(r);
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.write(body); req.end();
   });
 }
 
