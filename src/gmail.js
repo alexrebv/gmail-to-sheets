@@ -67,7 +67,9 @@ function extractSupplierFromHtml(html) {
   if (match) {
     const text = match[1]
       .replace(/<[^>]+>/g, '')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
       .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
       .trim();
     if (text && text.length > 2) return text;
   }
@@ -76,7 +78,11 @@ function extractSupplierFromHtml(html) {
   const cellRegex = /class="column0[^"]*"[^>]*>([\s\S]*?)<\/td>/gi;
   let m;
   while ((m = cellRegex.exec(html)) !== null) {
-    const text = m[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const text = m[1]
+      .replace(/<[^>]+>/g, '')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
+      .trim();
     if (/^(ИП|ООО|АО|ЗАО|ПАО)\s+/i.test(text)) return text;
   }
 
