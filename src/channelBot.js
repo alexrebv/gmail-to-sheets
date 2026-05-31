@@ -183,34 +183,34 @@ function formatObjectStatus(item, detailed = false) {
 /**
  * Обрабатывает команду /status <объект>
  */
-async function handleStatusCommand(chatId, objectQuery, cfg) {
-  await sendTyping(cfg, chatId);
+async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
+  await sendTyping(cfg, chatId, threadId);
 
   const data = await getStatusData(cfg, objectQuery);
 
   if (data.length === 0) {
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `Объект *${escMd(objectQuery)}* не найден в таблице\\.`, null, 0);
+      `Объект *${escMd(objectQuery)}* не найден в таблице.`, threadId, 0);
     return;
   }
 
   let text = `📊 *Статус: ${escMd(objectQuery)}*\n\n`;
   data.forEach(item => { text += formatObjectStatus(item, true) + '\n'; });
 
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
 
 /**
  * Обрабатывает команду /status_all
  */
-async function handleStatusAllCommand(chatId, cfg) {
-  await sendTyping(cfg, chatId);
+async function handleStatusAllCommand(chatId, threadId, cfg) {
+  await sendTyping(cfg, chatId, threadId);
 
   const data = await getStatusData(cfg, null);
 
   if (data.length === 0) {
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      'Нет данных в листе «Отправлен»\\.', null, 0);
+      'Нет данных в листе «Отправлен».', threadId, 0);
     return;
   }
 
@@ -240,20 +240,23 @@ async function handleStatusAllCommand(chatId, cfg) {
 
     // Если сообщение слишком длинное — отправляем порциями
     if (text.length > 3500) {
-      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
       text = '';
     }
   }
 
   if (text.trim()) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, null, 0);
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
   }
 }
 
 // Отправляет "печатает..." в чат
-async function sendTyping(cfg, chatId) {
+async function sendTyping(cfg, chatId, threadId = null) {
   const https = require('https');
-  const body = JSON.stringify({ chat_id: chatId, action: 'typing' });
+  const typingPayload = { chat_id: chatId, action: 'typing' };
+  const tid = parseInt(threadId);
+  if (!isNaN(tid) && tid > 0) typingPayload.message_thread_id = tid;
+  const body = JSON.stringify(typingPayload);
   return new Promise((resolve) => {
     const req = https.request({
       hostname: 'api.telegram.org',
@@ -284,11 +287,13 @@ app.post('/webhook', async (req, res) => {
       const msg    = update.message;
       const text   = (msg.text || '').trim();
       const chatId = msg.chat.id;
+      // Берём thread_id из входящего сообщения — отвечаем в тот же топик
+      const replyThreadId = msg.message_thread_id || null;
 
       // /status_all
       if (text === '/status_all' || text.startsWith('/status_all ')) {
-        console.log(`[channelBot] Команда /status_all от ${chatId}`);
-        await handleStatusAllCommand(chatId, cfg);
+        console.log(`[channelBot] Команда /status_all от ${chatId} thread:${replyThreadId}`);
+        await handleStatusAllCommand(chatId, replyThreadId, cfg);
         return;
       }
 
@@ -297,11 +302,11 @@ app.post('/webhook', async (req, res) => {
         const query = text.replace(/^\/status\s*/i, '').trim();
         if (!query) {
           await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-            'Укажите объект: `/status OD Нахабино`\nИли все: `/status_all`', null, 0);
+            'Укажите объект: `/status OD Нахабино`\nИли все: `/status_all`', replyThreadId, 0);
           return;
         }
-        console.log(`[channelBot] Команда /status "${query}" от ${chatId}`);
-        await handleStatusCommand(chatId, query, cfg);
+        console.log(`[channelBot] Команда /status "${query}" от ${chatId} thread:${replyThreadId}`);
+        await handleStatusCommand(chatId, replyThreadId, query, cfg);
         return;
       }
     }
