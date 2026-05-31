@@ -1,18 +1,20 @@
 /**
  * index.js — точка входа Railway-сервиса
  *
- * Три задачи по cron-расписанию (читаются из листа «Настройки»):
- *   CRON_GMAIL        — читает Gmail и пишет в «Отправлен»        (по умолчанию каждые 15 мин)
- *   CRON_SEND_ORDERS  — отправляет новые заказы в Telegram        (по умолчанию в 08:00)
- *   CRON_STATUS       — проверяет статусы Принят/Вычерк + уведом. (по умолчанию в 09:00)
+ * Запускает:
+ *  1. channelBot  — webhook-сервер для @AcceptODChannel (мгновенно пишет в «Принят»)
+ *  2. Gmail reader      — cron, читает почту → «Отправлен»
+ *  3. Send orders       — cron, шлёт заказы в Telegram
+ *  4. Check status      — cron, сверяет «Принят»/«Вычерк» с «Отправлен»
  */
 
 require('dotenv').config();
 const cron = require('node-cron');
-const { processGmailOrders }           = require('./gmail');
-const { sendOrdersToTelegram }         = require('./sendOrders');
-const { updateOrderStatusAndNotify }   = require('./checkStatus');
-const { getConfig }                    = require('./config');
+const { processGmailOrders }         = require('./gmail');
+const { sendOrdersToTelegram }       = require('./sendOrders');
+const { updateOrderStatusAndNotify } = require('./checkStatus');
+const { startChannelBot }            = require('./channelBot');
+const { getConfig }                  = require('./config');
 
 const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
@@ -21,11 +23,15 @@ const DEFAULT_CRON_STATUS      = '0 9 * * *';
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
 
+  // 1. Запускаем webhook-бот немедленно
+  await startChannelBot();
+
+  // 2. Загружаем расписания из таблицы
   let cfg = {};
   try {
     cfg = await getConfig();
   } catch (e) {
-    console.warn(`[${ts()}] Не удалось загрузить Настройки, использую дефолты: ${e.message}`);
+    console.warn(`[${ts()}] Настройки недоступны, использую дефолты: ${e.message}`);
   }
 
   const cronGmail      = cfg.CRON_GMAIL       || DEFAULT_CRON_GMAIL;
@@ -36,19 +42,13 @@ async function start() {
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
 
-  // ── Запуск при старте ────────────────────────────────────────────────────
-  run('Gmail reader',     processGmailOrders);
-  // sendOrders и checkStatus запускаем только по расписанию, не сразу
+  // 3. Первый запуск Gmail reader сразу
+  run('Gmail reader', processGmailOrders);
 
-  // ── Cron ─────────────────────────────────────────────────────────────────
-  cron.schedule(cronGmail, () =>
-    run('Gmail reader', processGmailOrders));
-
-  cron.schedule(cronSendOrders, () =>
-    run('Send orders → Telegram', sendOrdersToTelegram));
-
-  cron.schedule(cronStatus, () =>
-    run('Check status + notify', updateOrderStatusAndNotify));
+  // 4. Cron-задачи
+  cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
+  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
+  cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
 }
 
 async function run(label, fn) {
