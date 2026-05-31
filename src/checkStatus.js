@@ -28,7 +28,7 @@ const COL = {
     OBJ: 1, NUM: 2, SUPPLIER: 4, DATE: 5, LEGAL: 6,
     SENT_STATUS: 7, CROSSED: 9, ACC_STATUS: 10, ARCHIVE: 11,
   },
-  ACC:  { NUM: 2, DATE: 4, OBJ: 5, STATUS: 8 },
+  ACC:  { NUM: 2, TYPE: 3, DATE: 4, OBJ: 5, STATUS: 8 },
   CRS:  { NUM: 2, STATUS: 8 },
 };
 
@@ -80,13 +80,16 @@ async function updateOrderStatusAndNotify() {
     if (n) { crossedSet.add(n); crossedRowIdx[n] = i; }
   });
 
-  // Быстрый индекс принятых: "num|normObj|dateMs" → index в accRows
-  const acceptedMap = {};
+  // Быстрый индекс принятых только по номеру заказа
+  // Тип берём из колонки D (индекс 3): «Принят» или «Ошибка»
+  const acceptedMap = {}; // num → index
+  const errorMap    = {}; // num → index
   accRows.forEach((r, i) => {
-    const n   = norm(r[COL.ACC.NUM]);
-    const obj = norm(r[COL.ACC.OBJ]);
-    const d   = new Date(r[COL.ACC.DATE]); d.setHours(0,0,0,0);
-    if (n) acceptedMap[`${n}|${obj}|${d.getTime()}`] = i;
+    const n    = norm(r[COL.ACC.NUM]);           // C — Номер заказа
+    const type = (r[COL.ACC.TYPE] || '').toString().trim(); // D — Тип
+    if (!n) return;
+    if (type === 'Принят') acceptedMap[n] = i;
+    if (type === 'Ошибка')  errorMap[n]   = i;
   });
 
   // Накапливаем обновления для batchUpdate
@@ -129,17 +132,22 @@ async function updateOrderStatusAndNotify() {
     }
 
     // --- Принят ---
-    const accKey = `${num}|${norm(obj)}|${dateSent.getTime()}`;
-    const accIdx = acceptedMap[accKey];
+    // Сравниваем только по номеру заказа
+    const accIdx = acceptedMap[num];
+    const errIdx = errorMap[num];
     const foundAccepted = accIdx !== undefined;
+    const foundError    = errIdx !== undefined;
 
     if (foundAccepted) {
       accUpdates.push({ range: `'${SH_ACC}'!I${accIdx + 2}`, values: [['Проверено']] });
       sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['✅ Оприходовано']] });
+    } else if (foundError) {
+      accUpdates.push({ range: `'${SH_ACC}'!I${errIdx + 2}`, values: [['Ошибка проверена']] });
+      sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['❌ Ошибка регистрации']] });
     } else {
       const currStatus = disp(row[COL.SENT.ACC_STATUS]);
       if (!currStatus) {
-        sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['❌ Не оприходовано']] });
+        sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['⏳ Не оприходовано']] });
       }
     }
 
@@ -153,7 +161,8 @@ async function updateOrderStatusAndNotify() {
     let symbol = '';
     if (foundAccepted && hasCrossed) symbol = '❓✅';
     else if (foundAccepted)          symbol = '✅';
-    else                              symbol = '❌';
+    else if (foundError)             symbol = '❌';
+    else                             symbol = '⏳';
 
     const dateStr = formatDate(dateSent);
     const tgKey   = `${dateStr}|${supplier}`;
