@@ -1,0 +1,15 @@
+{
+  "name": "gmail-to-sheets",
+  "version": "1.0.0",
+  "description": "Reads Gmail orders and writes to Google Sheets",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.5"
+  }
+}
