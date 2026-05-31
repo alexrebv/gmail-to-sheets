@@ -124,7 +124,7 @@ function formatDate(d) {
 
 /** Экранирует спецсимволы Markdown v1 для Telegram */
 function escMd(s) {
-  return (s || '').toString().replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
+  return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
 
 module.exports = { sendOrdersToTelegram };
