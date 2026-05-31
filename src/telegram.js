@@ -1,26 +1,20 @@
 /**
  * telegram.js
- * Отправка сообщений в Telegram с поддержкой топиков (message_thread_id)
- * и разбивкой длинных сообщений.
+ * Отправка сообщений в Telegram с поддержкой топиков (message_thread_id).
  */
 
 const https = require('https');
 
-/**
- * Отправляет одно сообщение в Telegram.
- * @param {string} token      - Токен бота
- * @param {string|number} chatId    - ID чата
- * @param {string} text       - Текст (Markdown)
- * @param {number|null} threadId   - ID топика (или null)
- * @param {number} waitMs     - Задержка после отправки (мс)
- */
 async function sendMessage(token, chatId, text, threadId = null, waitMs = 5000) {
   const payload = {
     chat_id: chatId,
     text,
     parse_mode: 'Markdown',
   };
-  if (threadId) payload.message_thread_id = Number(threadId);
+
+  // threadId передаём если это число > 0
+  const tid = parseInt(threadId);
+  if (!isNaN(tid) && tid > 0) payload.message_thread_id = tid;
 
   await new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
@@ -39,9 +33,7 @@ async function sendMessage(token, chatId, text, threadId = null, waitMs = 5000) 
         res.on('data', (chunk) => (data += chunk));
         res.on('end', () => {
           const parsed = JSON.parse(data);
-          if (!parsed.ok) {
-            console.error('[Telegram] Ошибка:', parsed.description);
-          }
+          if (!parsed.ok) console.error('[Telegram] Ошибка:', parsed.description, '| thread_id:', tid);
           resolve(parsed);
         });
       }
@@ -54,9 +46,6 @@ async function sendMessage(token, chatId, text, threadId = null, waitMs = 5000) 
   if (waitMs > 0) await sleep(waitMs);
 }
 
-/**
- * Отправляет текст, разбивая на части если длиннее maxLen символов.
- */
 async function sendLongMessage(token, chatId, text, threadId = null, maxLen = 4000, waitMs = 5000) {
   const parts = splitMessage(text, maxLen);
   for (const part of parts) {
@@ -67,10 +56,7 @@ async function sendLongMessage(token, chatId, text, threadId = null, maxLen = 40
 function splitMessage(text, maxLen) {
   const parts = [];
   while (text.length > 0) {
-    if (text.length <= maxLen) {
-      parts.push(text);
-      break;
-    }
+    if (text.length <= maxLen) { parts.push(text); break; }
     let slice = text.slice(0, maxLen);
     const lastNl = slice.lastIndexOf('\n');
     if (lastNl > 0) slice = slice.slice(0, lastNl + 1);
