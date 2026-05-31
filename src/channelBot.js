@@ -118,6 +118,7 @@ async function getStatusData(cfg, objectFilter = null) {
   const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
 
   // Индекс принятых по номеру заказа
+  // Структура «Принят»: C=Номер, D=Тип(Принят/Ошибка), E=Дата, F=Объект
   const acceptedNums = new Set();
   const errorNums    = new Set();
   accRows.forEach(r => {
@@ -125,7 +126,7 @@ async function getStatusData(cfg, objectFilter = null) {
     const type = (r[3] || '').toString().trim(); // D — Тип
     if (!num) return;
     if (type === 'Принят') acceptedNums.add(num);
-    if (type === 'Ошибка')  errorNums.add(num);
+    if (type === 'Ошибка') errorNums.add(num);
   });
   console.log(`[getStatusData] Принят: ${acceptedNums.size} номеров, Ошибка: ${errorNums.size} номеров`);
   if (acceptedNums.size > 0) console.log('[getStatusData] Пример принятого номера:', [...acceptedNums][0]);
