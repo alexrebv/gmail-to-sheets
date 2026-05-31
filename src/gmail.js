@@ -11,10 +11,9 @@ function cleanObjectName(name) {
 }
 
 /**
- * Парсит тему письма — поддерживает форматы:
- *   #20260-749-0006   (цифры и дефисы)
- *   #2026-ОД15-3944   (с кириллицей)
- * Время может быть 1:23 или 01:23
+ * Парсит тему письма
+ * Поддерживает: #20260-749-0006, #2026-ОД15-3944
+ * Время: 1:23 и 01:23
  */
 function parseSubject(subject) {
   const regex = /Заказ для ресторана (.+?) (#\S+) создан (\d{2}\/\d{2}\/\d{2} \d{1,2}:\d{2})/;
@@ -50,33 +49,44 @@ function extractByMime(payload, mimeType) {
 }
 
 /**
- * Извлекает поставщика из HTML-тела письма iiko.
- * Поставщик находится в ячейках class="column5..." таблицы заказа.
- * Пример: "ИП Григорян - 1уп 8шт, заказ в уп" → "ИП Григорян"
+ * Извлекает поставщика из HTML письма iiko.
+ *
+ * Структура письма:
+ *   <tr> <td class="column0...">Поставщик</td> <td class="column4...">Получатель</td> </tr>
+ *   <tr> <td class="column0...">ИП Григорян Рафик Айкович</td> ... </tr>
+ *
+ * Ищем ячейку column0 с текстом "Поставщик",
+ * затем берём следующую строку column0 — это и есть имя поставщика.
  */
 function extractSupplierFromHtml(html) {
   if (!html) return '';
-  const tdRegex = /class="column5[^"]*"[^>]*>([\s\S]*?)<\/td>/gi;
-  let match;
-  while ((match = tdRegex.exec(html)) !== null) {
+
+  // Паттерн: блок "Поставщик" → следующая ячейка column0
+  const pattern = /class="column0[^"]*"[^>]*>\s*Поставщик\s*<\/td>[\s\S]*?class="column0[^"]*"[^>]*>([\s\S]*?)<\/td>/i;
+  const match = html.match(pattern);
+  if (match) {
     const text = match[1]
       .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
       .trim();
-    if (text && text.length > 2) {
-      const dashIdx = text.indexOf(' - ');
-      return dashIdx > 0 ? text.substring(0, dashIdx).trim() : text.trim();
-    }
+    if (text && text.length > 2) return text;
   }
+
+  // Fallback: ищем любую ячейку column0 с ИП/ООО/АО
+  const cellRegex = /class="column0[^"]*"[^>]*>([\s\S]*?)<\/td>/gi;
+  let m;
+  while ((m = cellRegex.exec(html)) !== null) {
+    const text = m[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+    if (/^(ИП|ООО|АО|ЗАО|ПАО)\s+/i.test(text)) return text;
+  }
+
   return '';
 }
 
 /** Fallback: поиск поставщика в plain-text теле */
 function extractSupplierFromPlain(text) {
   if (!text) return '';
-  const lines = text.split('\n');
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     const t = line.trim();
     if (/^(ИП|ООО|АО|ЗАО|ПАО)\s+/i.test(t)) {
       const dashIdx = t.indexOf(' - ');
@@ -147,18 +157,19 @@ async function processGmailOrders() {
       const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
 
       newRows.push([
-        emailDate,                   // A — Дата письма
-        object || subject,           // B — Объект (без ФГ)
-        orderNumber,                 // C — Номер заказа
-        orderDate,                   // D — Дата заказа
-        supplier,                    // E — Поставщик
-        emailDate,                   // F — Дата отправки
-        '',                          // G — Юр.лицо
-        '',                          // H — Направлено
-        plainBody.substring(0, 300) || htmlBody.substring(0, 300), // I — Тело
+        emailDate,         // A — Дата письма
+        object || subject, // B — Объект (без ФГ)
+        orderNumber,       // C — Номер заказа
+        orderDate,         // D — Дата заказа
+        supplier,          // E — Поставщик
+        emailDate,         // F — Дата отправки
+        '',                // G — Юр.лицо
+        '',                // H — Направлено
+        '',                // I — Тело (убрали HTML-мусор)
       ]);
 
       processedIds.push(id);
+      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}`);
     }
 
     const HEADERS = [
