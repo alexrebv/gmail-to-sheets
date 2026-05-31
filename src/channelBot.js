@@ -267,7 +267,7 @@ async function sendTyping(cfg, chatId) {
 }
 
 function escMd(s) {
-  return (s || '').toString().replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
 
 // ── Webhook endpoint ──────────────────────────────────────────────────────────
