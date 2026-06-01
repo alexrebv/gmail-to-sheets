@@ -40,7 +40,10 @@ async function start() {
   const cronStatus     = cfg.CRON_STATUS      || DEFAULT_CRON_STATUS;
   const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
 
-  console.log(`  Gmail reader   : ${cronGmail}`);
+  const TZ = cfg.TIMEZONE || 'Europe/Moscow';
+  const cronOpts = { timezone: TZ };
+
+  console.log(`  Gmail reader   : ${cronGmail} (${TZ})`);
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
   console.log(`  End day summary: ${cronEndDay}`);
@@ -49,10 +52,10 @@ async function start() {
   run('Gmail reader', processGmailOrders);
 
   // 4. Cron-задачи
-  cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
-  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
-  cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
-  cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary));
+  cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders),  cronOpts);
+  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram), cronOpts);
+  cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify), cronOpts);
+  cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary), cronOpts);
 }
 
 async function runEndDaySummary() {

@@ -88,6 +88,167 @@ async function writeToSheet(parsed, rawText, cfg) {
   });
 
   console.log(`[channelBot] ✓ ${parsed.type} | ${parsed.orderNumber} | ${parsed.object} | ${parsed.supplier}`);
+
+  // Если ошибка регистрации — сразу уведомить в чат и пометить в «Отправлен»
+  if (parsed.type === 'Ошибка') {
+    await markErrorInSent(parsed, cfg);
+    await notifyIikoError(parsed, cfg);
+  }
+}
+
+/** Помечает строку в «Отправлен» статусом ❌ Ошибка IIKO по номеру заказа */
+async function markErrorInSent(parsed, cfg) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${SH_SENT}'!A2:K`,
+  });
+  const rows = res.data.values || [];
+
+  const targetNum = norm(parsed.orderNumber);
+  const updates   = [];
+
+  rows.forEach((row, i) => {
+    if (norm(row[2]) === targetNum) {
+      updates.push({ range: `'${SH_SENT}'!K${i + 2}`, values: [['❌ Ошибка IIKO']] });
+    }
+  });
+
+  if (updates.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
+    });
+    console.log(`[channelBot] Помечено ошибкой IIKO: ${parsed.orderNumber}`);
+  }
+}
+
+/** Отправляет уведомление об ошибке регистрации в IIKO */
+async function notifyIikoError(parsed, cfg) {
+  const token    = cfg.TELEGRAM_TOKEN;
+  const chatId   = cfg.TELEGRAM_CHAT_ID;
+  const threadId = cfg.TELEGRAM_THREAD_ID || null;
+  if (!token || !chatId) return;
+
+  const text =
+    `❌ *Не упало в IIKO\\!*\n` +
+    `Объект: ${escMd(parsed.object)}\n` +
+    `Поставщик: ${escMd(parsed.supplier)}\n` +
+    `Номер накладной: ${escMd(parsed.orderNumber)}\n` +
+    `Дата поставки: ${escMd(parsed.deliveryDate)}`;
+
+  await sendMessage(token, chatId, text, threadId, 0);
+}
+
+/** Сканирует лист «Принят» на Ошибка-записи, помечает «Отправлен» и уведомляет */
+async function processIikoErrors(cfg) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
+  const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+
+  const [sentRes, accRes] = await Promise.all([
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:K` }),
+    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_ACC}'!A2:G` }),
+  ]);
+
+  const sentRows = sentRes.data.values || [];
+  const accRows  = accRes.data.values  || [];
+
+  // Индекс строк «Отправлен» по номеру заказа
+  const sentIndex = {}; // norm(num) → { rowNum, accStatus, obj, supplier }
+  sentRows.forEach((row, i) => {
+    const num = norm(row[2]);
+    if (num) sentIndex[num] = { rowNum: i + 2, accStatus: (row[10] || '').toString().trim(), obj: row[1], supplier: row[4] };
+  });
+
+  const updates  = [];
+  const toNotify = [];
+
+  accRows.forEach(row => {
+    const num  = norm(row[2]);                       // C — номер
+    const type = (row[3] || '').toString().trim();   // D — тип
+    if (type !== 'Ошибка' || !num) return;
+
+    const sent = sentIndex[num];
+    if (!sent) return;
+    if (sent.accStatus.startsWith('❌')) return; // уже помечено
+
+    updates.push({ range: `'${SH_SENT}'!K${sent.rowNum}`, values: [['❌ Ошибка IIKO']] });
+    toNotify.push({
+      orderNumber:  row[2],                          // C — оригинальный номер
+      object:       cleanObjectName((row[5] || '').toString().trim()), // F
+      supplier:     (row[1] || '').toString().trim(), // B
+      deliveryDate: (row[4] || '').toString().trim(), // E
+    });
+  });
+
+  if (updates.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
+    });
+    console.log(`[processIikoErrors] Помечено: ${updates.length}`);
+  }
+
+  for (const p of toNotify) {
+    await notifyIikoError(p, cfg);
+  }
+
+  return toNotify.length;
+}
+
+/** Удаляет накладную из оборота по объекту и номеру заказа */
+async function deleteOrderFromNotifications(chatId, threadId, objectQuery, orderNum, cfg) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${SH_SENT}'!A2:K`,
+  });
+  const rows = res.data.values || [];
+
+  const targetNum = norm(orderNum);
+  const updates   = [];
+
+  rows.forEach((row, i) => {
+    const rowNum = i + 2;
+    const obj    = cleanObjectName((row[1] || '').toString().trim());
+    const num    = norm(row[2]);
+    if (num !== targetNum) return;
+    if (objectQuery && !norm(obj).includes(norm(objectQuery))) return;
+
+    updates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['❌ Удалено вручную']] });
+  });
+
+  if (updates.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      `Накладная ${escMd(orderNum)} не найдена в «Отправлен».`, threadId, 0);
+    return;
+  }
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
+  });
+
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+    `✅ Накладная ${escMd(orderNum)} убрана из оповещений.`, threadId, 0);
+  console.log(`[delete] Удалено из оборота: ${orderNum}`);
 }
 
 // ── Команды /status и /status_all ─────────────────────────────────────────────
@@ -168,9 +329,12 @@ async function getPendingOrders(cfg, objectFilter = null) {
     const dateRaw  = (row[5] || '').toString().trim();                   // F — Дата отправки
     const archive  = (row[11] || '').toString().trim();                  // L
 
+    const accStatus = (row[10] || '').toString().trim(); // K — Статус приёмки
+
     if (!obj || !num) continue;
     if (archive.startsWith('Архив')) continue;
-    if (acceptedNums.has(num)) continue; // принято — не показываем
+    if (acceptedNums.has(num)) continue;          // принято
+    if (accStatus.startsWith('❌')) continue;      // ошибка IIKO / удалено вручную
 
     if (objectFilter && !norm(obj).includes(norm(objectFilter))) continue;
 
@@ -403,6 +567,28 @@ app.post('/webhook', async (req, res) => {
         }
         console.log(`[channelBot] Команда /status "${query}" от ${chatId} thread:${replyThreadId}`);
         await handleStatusCommand(chatId, replyThreadId, query, cfg);
+        return;
+      }
+
+      // /delete <объект> <#номер>
+      if (text.startsWith('/delete_test')) {
+        console.log(`[channelBot] Команда /delete_test от ${chatId}`);
+        await processIikoErrors(cfg);
+        await sendMessage(cfg.TELEGRAM_TOKEN, chatId, 'Проверка ошибок IIKO выполнена.', replyThreadId, 0);
+        return;
+      }
+      if (text.startsWith('/delete ')) {
+        const parts = text.replace(/^\/delete\s+/, '').trim();
+        const m = parts.match(/^(.+?)\s+(#?\S+)$/);
+        if (!m) {
+          await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+            'Формат: `/delete Объект #НомерНакладной`', replyThreadId, 0);
+          return;
+        }
+        const objectQuery = m[1].trim();
+        const orderNum = m[2].replace(/^#/, '').trim();
+        console.log(`[channelBot] Команда /delete "${objectQuery}" #${orderNum}`);
+        await deleteOrderFromNotifications(chatId, replyThreadId, objectQuery, orderNum, cfg);
         return;
       }
     }
