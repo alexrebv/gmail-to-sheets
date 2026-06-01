@@ -227,28 +227,33 @@ function groupBySupplier(pending) {
 }
 
 /**
- * Обрабатывает команду /status <объект>
+ * Обрабатывает команду /status <объект[, объект2, ...]>
  */
 async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
   await sendTyping(cfg, chatId, threadId);
 
-  const pending = await getPendingOrders(cfg, objectQuery);
+  // Разбиваем по запятой — поддержка нескольких объектов
+  const queries = objectQuery.split(',').map(s => s.trim()).filter(Boolean);
 
-  if (pending.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `✅ Для объекта *${escMd(objectQuery)}* все накладные приняты.`, threadId, 0);
-    return;
+  for (const query of queries) {
+    const pending = await getPendingOrders(cfg, query);
+
+    if (pending.length === 0) {
+      await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+        `✅ *${escMd(query)}* — все накладные приняты.`, threadId, 0);
+      continue;
+    }
+
+    const bySupplier = groupBySupplier(pending);
+    let text = `*Не принятые накладные — ${escMd(query)}*\n`;
+
+    for (const supplier of Object.keys(bySupplier).sort()) {
+      text += `\n*${escMd(supplier)}*\n`;
+      text += buildDatesText(bySupplier[supplier]);
+    }
+
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
   }
-
-  const bySupplier = groupBySupplier(pending);
-  let text = `*Не принятые накладные — ${escMd(objectQuery)}*\n`;
-
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    text += `\n*${escMd(supplier)}*\n`;
-    text += buildDatesText(bySupplier[supplier]);
-  }
-
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
 
 /**
