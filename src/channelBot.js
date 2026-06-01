@@ -17,6 +17,7 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
+const { parseDateStr, todayDateKey } = require('./dateUtils');
 
 const app = express();
 app.use(express.json());
@@ -254,45 +255,13 @@ async function deleteOrderFromNotifications(chatId, threadId, objectQuery, order
 // ── Команды /status и /status_all ─────────────────────────────────────────────
 
 /**
- * Парсит дату из строки без new Date() (избегаем UTC-сдвига).
- * Форматы: "2026-05-31 11:50:00", "31.05.2026, 11:50", "31.05.2026"
- * Возвращает { dd, mm, yyyy } или null.
- */
-function parseDateStr(s) {
-  if (!s) return null;
-  s = s.toString().trim();
-
-  // ISO-like: 2026-05-31 или 2026-05-31 11:50:00
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return { yyyy: iso[1], mm: iso[2], dd: iso[3] };
-
-  // Русский: 31.05.2026 или 31.05.2026, 11:50 или 31.05.26
-  const ru = s.match(/^(\d{2})\.(\d{2})\.(\d{2,4})/);
-  if (ru) {
-    const yyyy = ru[3].length === 2 ? `20${ru[3]}` : ru[3];
-    return { yyyy, mm: ru[2], dd: ru[1] };
-  }
-
-  return null;
-}
-
-/** Возвращает YYYYMMDD сегодняшней даты в локальном времени */
-function todayDateKey() {
-  const t = new Date();
-  const dd   = String(t.getDate()).padStart(2, '0');
-  const mm   = String(t.getMonth() + 1).padStart(2, '0');
-  const yyyy = String(t.getFullYear());
-  return `${yyyy}${mm}${dd}`;
-}
-
-/**
  * Читает листы «Отправлен» и «Принят», возвращает только непринятые строки.
  * Если objectFilter задан — фильтрует по вхождению строки в название объекта.
  *
  * Возвращает массив: [{ supplier, dateStr, dateSortKey, object, status }]
  * status: '⏳' — не оприходовано, '❌' — ошибка регистрации
  */
-async function getPendingOrders(cfg, objectFilter = null) {
+async function getPendingOrders(cfg, objectFilter = null, supplierFilter = null) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
@@ -336,7 +305,8 @@ async function getPendingOrders(cfg, objectFilter = null) {
     if (acceptedNums.has(num)) continue;          // принято
     if (accStatus.startsWith('❌')) continue;      // ошибка IIKO / удалено вручную
 
-    if (objectFilter && !norm(obj).includes(norm(objectFilter))) continue;
+    if (objectFilter  && !norm(obj).includes(norm(objectFilter))) continue;
+    if (supplierFilter && !norm(supplier).includes(norm(supplierFilter))) continue;
 
     const status = errorNums.has(num) ? '❌' : '⏳';
 
@@ -459,6 +429,31 @@ async function handleStatusAllCommand(chatId, threadId, cfg) {
 }
 
 /**
+ * /time_sup {поставщик} — все непринятые накладные по конкретному поставщику
+ */
+async function handleStatusSupplierCommand(chatId, threadId, supplierQuery, cfg) {
+  await sendTyping(cfg, chatId, threadId);
+
+  const pending = await getPendingOrders(cfg, null, supplierQuery);
+
+  if (pending.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      `✅ *${escMd(supplierQuery)}* — все накладные приняты.`, threadId, 0);
+    return;
+  }
+
+  const bySupplier = groupBySupplier(pending);
+  let text = `*Не принятые накладные — ${escMd(supplierQuery)}*\n`;
+
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+    text += buildDatesText(bySupplier[supplier], true);
+  }
+
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+}
+
+/**
  * Итог дня: по каждому объекту — сколько накладных не принято.
  * Группировка: Поставщик → список объектов с количеством.
  */
@@ -573,6 +568,19 @@ app.post('/webhook', async (req, res) => {
         }
         console.log(`[channelBot] Команда /status "${query}" от ${chatId} thread:${replyThreadId}`);
         await handleStatusCommand(chatId, replyThreadId, query, cfg);
+        return;
+      }
+
+      // /time_sup {поставщик}
+      if (text.startsWith('/time_sup')) {
+        const query = text.replace(/^\/time_sup\s*/i, '').trim();
+        if (!query) {
+          await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+            'Укажите поставщика: `/time_sup Скай ООО`', replyThreadId, 0);
+          return;
+        }
+        console.log(`[channelBot] Команда /time_sup "${query}" от ${chatId}`);
+        await handleStatusSupplierCommand(chatId, replyThreadId, query, cfg);
         return;
       }
 

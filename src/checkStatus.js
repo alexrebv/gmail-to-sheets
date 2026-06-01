@@ -22,6 +22,7 @@
 const { getAuthClient, getSheetsClient } = require('./auth');
 const { getConfig } = require('./config');
 const { sendLongMessage } = require('./telegram');
+const { parseDateStr, todayDateKey } = require('./dateUtils');
 
 const COL = {
   SENT: {
@@ -69,8 +70,7 @@ async function updateOrderStatusAndNotify() {
   const norm = s => (s || '').toString().replace(/\s/g, '').trim().replace(/^#/, '');
   const disp = s => (s || '').toString().trim();
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const todayKey = todayDateKey(); // YYYYMMDD in local time
 
   // Быстрый индекс по вычеркнутым
   const crossedSet = new Set();
@@ -115,11 +115,15 @@ async function updateOrderStatusAndNotify() {
     if (!obj || !numRaw || !dateRaw) continue;
     if (archFlag.startsWith('Архив')) continue;
 
-    const dateSent = new Date(dateRaw);
-    if (isNaN(dateSent)) continue;
-    dateSent.setHours(0, 0, 0, 0);
-    if (dateSent.getTime() >= today.getTime()) continue; // только прошлые дни
+    const dateParts = parseDateStr(dateRaw);
+    if (!dateParts) continue;
+    const { dd: pdd, mm: pmm, yyyy: pyyyy } = dateParts;
+    const sortKey = `${pyyyy}${pmm}${pdd}`;
+    if (sortKey >= todayKey) continue; // только прошлые дни
 
+    // daysDiff for archiving
+    const dateSent = new Date(`${pyyyy}-${pmm}-${pdd}T00:00:00`);
+    const today    = new Date(); today.setHours(0, 0, 0, 0);
     const daysDiff = Math.floor((today - dateSent) / 86400000);
 
     // --- Вычерк ---
@@ -164,7 +168,7 @@ async function updateOrderStatusAndNotify() {
     else if (foundError)             symbol = '❌';
     else                             symbol = '⏳';
 
-    const dateStr = formatDate(dateSent);
+    const dateStr = `${pdd}.${pmm}.${pyyyy.slice(-2)}`;
     const tgKey   = `${dateStr}|${supplier}`;
     if (!tgGroups[tgKey]) tgGroups[tgKey] = { legal, objects: [], dateMs: dateSent.getTime() };
     tgGroups[tgKey].objects.push({ symbol, obj, isOld: daysDiff >= ARCHIVE_DAYS });
