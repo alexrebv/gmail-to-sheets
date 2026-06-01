@@ -24,8 +24,8 @@ app.use(express.json());
 // ── Regex для парсинга сообщений канала ───────────────────────────────────────
 
 const RE_ACCEPTED = /Заказ\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+был\s+оприходован/i;
-const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
-const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой/i;
+const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
+const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой/i;
 
 function cleanObjectName(name) {
   return (name || '').replace(/\s+(ФГ|ДР|DR|DP|GSW)\s*$/i, '').trim();
@@ -357,21 +357,27 @@ async function getPendingOrders(cfg, objectFilter = null) {
     const dateStr     = `${dd}.${mm}.${yy}`;
     const dateSortKey = sortKey;
 
-    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
+    const rawNum = (row[2] || '').toString().trim(); // C — оригинальный номер
+    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status, orderNum: rawNum });
   }
 
   return pending;
 }
 
-/** Форматирует блок дат → объекты (без эмодзи, без названия поставщика) */
-function buildDatesText(dateMap) {
+/**
+ * Форматирует блок дат → строки.
+ * showObject=true  (status_all): "Объект #номер"
+ * showObject=false (status obj): "#номер"
+ */
+function buildDatesText(dateMap, showObject = true) {
   let text = '';
   const dateKeys = Object.keys(dateMap).sort().reverse(); // новые сверху
   for (const dk of dateKeys) {
     const { dateStr, objects } = dateMap[dk];
     text += `Дата ${escMd(dateStr)}\n`;
-    for (const { object } of objects) {
-      text += `${escMd(object)}\n`;
+    for (const { object, orderNum } of objects) {
+      const numStr = orderNum ? ` ${escMd(orderNum)}` : '';
+      text += showObject ? `${escMd(object)}${numStr}\n` : `${numStr.trim()}\n`;
     }
   }
   return text;
@@ -380,12 +386,12 @@ function buildDatesText(dateMap) {
 /** Группирует pending по поставщику → dateMap */
 function groupBySupplier(pending) {
   const bySupplier = {};
-  for (const { supplier, dateStr, dateSortKey, object } of pending) {
+  for (const { supplier, dateStr, dateSortKey, object, orderNum } of pending) {
     if (!bySupplier[supplier]) bySupplier[supplier] = {};
     if (!bySupplier[supplier][dateSortKey]) {
       bySupplier[supplier][dateSortKey] = { dateStr, objects: [] };
     }
-    bySupplier[supplier][dateSortKey].objects.push({ object });
+    bySupplier[supplier][dateSortKey].objects.push({ object, orderNum });
   }
   return bySupplier;
 }
@@ -413,7 +419,7 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
 
     for (const supplier of Object.keys(bySupplier).sort()) {
       text += `\n*${escMd(supplier)}*\n`;
-      text += buildDatesText(bySupplier[supplier]);
+      text += buildDatesText(bySupplier[supplier], false); // объект уже в заголовке
     }
 
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
@@ -567,6 +573,15 @@ app.post('/webhook', async (req, res) => {
         }
         console.log(`[channelBot] Команда /status "${query}" от ${chatId} thread:${replyThreadId}`);
         await handleStatusCommand(chatId, replyThreadId, query, cfg);
+        return;
+      }
+
+      // /time_all — ручной запуск отчёта по статусам (аналог крона checkStatus)
+      if (text === '/time_all') {
+        console.log(`[channelBot] Команда /time_all от ${chatId}`);
+        await sendTyping(cfg, chatId, replyThreadId);
+        const { updateOrderStatusAndNotify } = require('./checkStatus');
+        await updateOrderStatusAndNotify();
         return;
       }
 
