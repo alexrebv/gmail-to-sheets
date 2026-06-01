@@ -93,6 +93,38 @@ async function writeToSheet(parsed, rawText, cfg) {
 // ── Команды /status и /status_all ─────────────────────────────────────────────
 
 /**
+ * Парсит дату из строки без new Date() (избегаем UTC-сдвига).
+ * Форматы: "2026-05-31 11:50:00", "31.05.2026, 11:50", "31.05.2026"
+ * Возвращает { dd, mm, yyyy } или null.
+ */
+function parseDateStr(s) {
+  if (!s) return null;
+  s = s.toString().trim();
+
+  // ISO-like: 2026-05-31 или 2026-05-31 11:50:00
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return { yyyy: iso[1], mm: iso[2], dd: iso[3] };
+
+  // Русский: 31.05.2026 или 31.05.2026, 11:50 или 31.05.26
+  const ru = s.match(/^(\d{2})\.(\d{2})\.(\d{2,4})/);
+  if (ru) {
+    const yyyy = ru[3].length === 2 ? `20${ru[3]}` : ru[3];
+    return { yyyy, mm: ru[2], dd: ru[1] };
+  }
+
+  return null;
+}
+
+/** Возвращает YYYYMMDD сегодняшней даты в локальном времени */
+function todayDateKey() {
+  const t = new Date();
+  const dd   = String(t.getDate()).padStart(2, '0');
+  const mm   = String(t.getMonth() + 1).padStart(2, '0');
+  const yyyy = String(t.getFullYear());
+  return `${yyyy}${mm}${dd}`;
+}
+
+/**
  * Читает листы «Отправлен» и «Принят», возвращает только непринятые строки.
  * Если objectFilter задан — фильтрует по вхождению строки в название объекта.
  *
@@ -144,37 +176,22 @@ async function getPendingOrders(cfg, objectFilter = null) {
 
     const status = errorNums.has(num) ? '❌' : '⏳';
 
-    // Нормализуем дату к DD.MM.YY для отображения и к YYYYMMDD для сортировки
-    let dateStr     = dateRaw;
-    let dateSortKey = dateRaw;
-    const dParsed   = new Date(dateRaw);
-    if (!isNaN(dParsed)) {
-      const dMidnight = new Date(dParsed);
-      dMidnight.setHours(0, 0, 0, 0);
-      const todayMidnight = new Date();
-      todayMidnight.setHours(0, 0, 0, 0);
-      if (dMidnight >= todayMidnight) continue; // сегодняшние — не показываем
+    // Парсим дату строкой — без new Date() во избежание UTC-сдвига
+    // Поддерживаемые форматы:
+    //   2026-05-31 11:50:00   (ISO-like)
+    //   31.05.2026, 11:50     (русский с запятой)
+    //   31.05.2026            (русский без времени)
+    const parsed = parseDateStr(dateRaw);
+    if (!parsed) continue;
 
-      const dd   = String(dParsed.getDate()).padStart(2, '0');
-      const mm   = String(dParsed.getMonth() + 1).padStart(2, '0');
-      const yy   = String(dParsed.getFullYear()).slice(-2);
-      const yyyy = dParsed.getFullYear();
-      dateStr     = `${dd}.${mm}.${yy}`;
-      dateSortKey = `${yyyy}${mm}${dd}`;
-    } else {
-      // уже в формате DD.MM.YYYY или DD.MM.YY
-      const parts4 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
-      const parts2 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
-      if (parts4) {
-        const todayStr = (() => { const t = new Date(); t.setHours(0,0,0,0); return t; })();
-        const d = new Date(`${parts4[3]}-${parts4[2]}-${parts4[1]}`);
-        if (d >= todayStr) continue;
-        dateSortKey = `${parts4[3]}${parts4[2]}${parts4[1]}`;
-        dateStr = `${parts4[1]}.${parts4[2]}.${String(parts4[3]).slice(-2)}`;
-      } else if (parts2) {
-        dateSortKey = `20${parts2[3]}${parts2[2]}${parts2[1]}`;
-      }
-    }
+    const { dd, mm, yyyy } = parsed;
+    const todayKey = todayDateKey();
+    const sortKey  = `${yyyy}${mm}${dd}`;
+    if (sortKey >= todayKey) continue; // сегодняшние — не показываем
+
+    const yy = yyyy.slice(-2);
+    const dateStr     = `${dd}.${mm}.${yy}`;
+    const dateSortKey = sortKey;
 
     pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
   }
