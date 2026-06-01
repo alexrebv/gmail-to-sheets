@@ -212,7 +212,7 @@ async function processIikoErrors(cfg) {
 async function deleteOrderFromNotifications(chatId, threadId, objectQuery, orderNum, cfg) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
-  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().replace(/^#/, '').trim();
 
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
