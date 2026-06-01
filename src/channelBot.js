@@ -283,6 +283,54 @@ async function handleStatusAllCommand(chatId, threadId, cfg) {
   }
 }
 
+/**
+ * Итог дня: по каждому объекту — сколько накладных не принято.
+ * Группировка: Поставщик → список объектов с количеством.
+ */
+async function sendEndDaySummary(chatId, threadId, cfg) {
+  const pending = await getPendingOrders(cfg, null);
+
+  const today = new Date();
+  const dd = String(today.getDate()).padStart(2, '0');
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const yy = String(today.getFullYear()).slice(-2);
+  const dateLabel = `${dd}.${mm}.${yy}`;
+
+  if (pending.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      `✅ *Итог дня ${escMd(dateLabel)}*\nВсе накладные приняты.`, threadId, 0);
+    return;
+  }
+
+  // Группируем: supplier → object → count
+  const bySupplier = {};
+  for (const { supplier, object } of pending) {
+    if (!bySupplier[supplier]) bySupplier[supplier] = {};
+    bySupplier[supplier][object] = (bySupplier[supplier][object] || 0) + 1;
+  }
+
+  const total = pending.length;
+  let text = `*Итог дня ${escMd(dateLabel)}*\nНе принято накладных: ${total}\n`;
+
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+    const objects = bySupplier[supplier];
+    for (const obj of Object.keys(objects).sort()) {
+      const cnt = objects[obj];
+      text += `${escMd(obj)} — ${cnt}\n`;
+    }
+
+    if (text.length > 3500) {
+      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+      text = '';
+    }
+  }
+
+  if (text.trim()) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+  }
+}
+
 // Отправляет "печатает..." в чат
 async function sendTyping(cfg, chatId, threadId = null) {
   const https = require('https');
@@ -322,6 +370,14 @@ app.post('/webhook', async (req, res) => {
       const chatId = msg.chat.id;
       // Берём thread_id из входящего сообщения — отвечаем в тот же топик
       const replyThreadId = msg.message_thread_id || null;
+
+      // /end_day — итог дня вручную
+      if (text === '/end_day') {
+        console.log(`[channelBot] Команда /end_day от ${chatId} thread:${replyThreadId}`);
+        await sendTyping(cfg, chatId, replyThreadId);
+        await sendEndDaySummary(chatId, replyThreadId, cfg);
+        return;
+      }
 
       // /errors — Excel с ошибками регистрации
       if (text === '/errors') {
@@ -423,4 +479,4 @@ async function startChannelBot() {
   }
 }
 
-module.exports = { startChannelBot, parseChannelMessage };
+module.exports = { startChannelBot, parseChannelMessage, sendEndDaySummary };

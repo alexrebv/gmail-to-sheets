@@ -13,12 +13,13 @@ const cron = require('node-cron');
 const { processGmailOrders }         = require('./gmail');
 const { sendOrdersToTelegram }       = require('./sendOrders');
 const { updateOrderStatusAndNotify } = require('./checkStatus');
-const { startChannelBot }            = require('./channelBot');
-const { getConfig }                  = require('./config');
+const { startChannelBot, sendEndDaySummary } = require('./channelBot');
+const { getConfig }                          = require('./config');
 
 const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
+const DEFAULT_CRON_END_DAY     = '30 22 * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
@@ -37,10 +38,12 @@ async function start() {
   const cronGmail      = cfg.CRON_GMAIL       || DEFAULT_CRON_GMAIL;
   const cronSendOrders = cfg.CRON_SEND_ORDERS || DEFAULT_CRON_SEND_ORDERS;
   const cronStatus     = cfg.CRON_STATUS      || DEFAULT_CRON_STATUS;
+  const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
 
   console.log(`  Gmail reader   : ${cronGmail}`);
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
+  console.log(`  End day summary: ${cronEndDay}`);
 
   // 3. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
@@ -49,6 +52,16 @@ async function start() {
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
   cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
+  cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary));
+}
+
+async function runEndDaySummary() {
+  const cfg = await getConfig();
+  if (!cfg.TELEGRAM_TOKEN || !cfg.TELEGRAM_CHAT_ID) {
+    console.warn('[end_day] TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не заданы');
+    return;
+  }
+  await sendEndDaySummary(cfg.TELEGRAM_CHAT_ID, cfg.TELEGRAM_THREAD_ID || null, cfg);
 }
 
 async function run(label, fn) {
