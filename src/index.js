@@ -18,7 +18,7 @@ const { getConfig }                  = require('./config');
 
 const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
-const DEFAULT_CRON_STATUS      = '0 9 * * *';
+const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);

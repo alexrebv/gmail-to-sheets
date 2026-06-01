@@ -144,20 +144,36 @@ async function getPendingOrders(cfg, objectFilter = null) {
 
     const status = errorNums.has(num) ? '❌' : '⏳';
 
-    // Нормализуем дату к DD.MM.YYYY для отображения и к YYYYMMDD для сортировки
+    // Нормализуем дату к DD.MM.YY для отображения и к YYYYMMDD для сортировки
     let dateStr     = dateRaw;
     let dateSortKey = dateRaw;
     const dParsed   = new Date(dateRaw);
     if (!isNaN(dParsed)) {
-      const dd = String(dParsed.getDate()).padStart(2, '0');
-      const mm = String(dParsed.getMonth() + 1).padStart(2, '0');
+      const dMidnight = new Date(dParsed);
+      dMidnight.setHours(0, 0, 0, 0);
+      const todayMidnight = new Date();
+      todayMidnight.setHours(0, 0, 0, 0);
+      if (dMidnight >= todayMidnight) continue; // сегодняшние — не показываем
+
+      const dd   = String(dParsed.getDate()).padStart(2, '0');
+      const mm   = String(dParsed.getMonth() + 1).padStart(2, '0');
+      const yy   = String(dParsed.getFullYear()).slice(-2);
       const yyyy = dParsed.getFullYear();
-      dateStr     = `${dd}.${mm}.${yyyy}`;
+      dateStr     = `${dd}.${mm}.${yy}`;
       dateSortKey = `${yyyy}${mm}${dd}`;
     } else {
-      // уже в формате DD.MM.YYYY
-      const parts = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
-      if (parts) dateSortKey = `${parts[3]}${parts[2]}${parts[1]}`;
+      // уже в формате DD.MM.YYYY или DD.MM.YY
+      const parts4 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+      const parts2 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
+      if (parts4) {
+        const todayStr = (() => { const t = new Date(); t.setHours(0,0,0,0); return t; })();
+        const d = new Date(`${parts4[3]}-${parts4[2]}-${parts4[1]}`);
+        if (d >= todayStr) continue;
+        dateSortKey = `${parts4[3]}${parts4[2]}${parts4[1]}`;
+        dateStr = `${parts4[1]}.${parts4[2]}.${String(parts4[3]).slice(-2)}`;
+      } else if (parts2) {
+        dateSortKey = `20${parts2[3]}${parts2[2]}${parts2[1]}`;
+      }
     }
 
     pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
