@@ -93,13 +93,13 @@ async function writeToSheet(parsed, rawText, cfg) {
 // ── Команды /status и /status_all ─────────────────────────────────────────────
 
 /**
- * Читает лист «Отправлен» и возвращает статистику по объектам.
- * Если objectFilter задан — только по нему, иначе по всем.
+ * Читает листы «Отправлен» и «Принят», возвращает только непринятые строки.
+ * Если objectFilter задан — фильтрует по вхождению строки в название объекта.
  *
- * Возвращает массив:
- * [{ object, supplier, total, accepted, errors, notAccepted, orderNums[] }]
+ * Возвращает массив: [{ supplier, dateStr, dateSortKey, object, status }]
+ * status: '⏳' — не оприходовано, '❌' — ошибка регистрации
  */
-async function getStatusData(cfg, objectFilter = null) {
+async function getPendingOrders(cfg, objectFilter = null) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
@@ -117,70 +117,85 @@ async function getStatusData(cfg, objectFilter = null) {
 
   const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
 
-  // Индекс принятых по номеру заказа
-  // Структура «Принят»: C=Номер, D=Тип(Принят/Ошибка), E=Дата, F=Объект
   const acceptedNums = new Set();
   const errorNums    = new Set();
   accRows.forEach(r => {
-    const num  = norm(r[2]);  // C — Номер заказа
-    const type = (r[3] || '').toString().trim(); // D — Тип
+    const num  = norm(r[2]);
+    const type = (r[3] || '').toString().trim();
     if (!num) return;
     if (type === 'Принят') acceptedNums.add(num);
     if (type === 'Ошибка') errorNums.add(num);
   });
-  console.log(`[getStatusData] Принят: ${acceptedNums.size} номеров, Ошибка: ${errorNums.size} номеров`);
-  if (acceptedNums.size > 0) console.log('[getStatusData] Пример принятого номера:', [...acceptedNums][0]);
 
-  // Группируем «Отправлен» по объекту
-  const grouped = {}; // { object: { supplier, orders: [{num, status}] } }
+  const pending = [];
 
   for (const row of sentRows) {
     const obj      = cleanObjectName((row[1] || '').toString().trim()); // B
-    const num      = norm(row[2]);  // C — Номер заказа
-    const supplier = (row[4] || '').toString().trim(); // E
-    const archive  = (row[11] || '').toString().trim(); // L
+    const num      = norm(row[2]);                                       // C
+    const supplier = (row[4] || '').toString().trim();                   // E
+    const dateRaw  = (row[5] || '').toString().trim();                   // F — Дата отправки
+    const archive  = (row[11] || '').toString().trim();                  // L
 
     if (!obj || !num) continue;
     if (archive.startsWith('Архив')) continue;
+    if (acceptedNums.has(num)) continue; // принято — не показываем
 
-    // Фильтр по объекту если задан
-    if (objectFilter) {
-      const filterNorm = norm(objectFilter);
-      if (!norm(obj).includes(filterNorm)) continue;
+    if (objectFilter && !norm(obj).includes(norm(objectFilter))) continue;
+
+    const status = errorNums.has(num) ? '❌' : '⏳';
+
+    // Нормализуем дату к DD.MM.YYYY для отображения и к YYYYMMDD для сортировки
+    let dateStr     = dateRaw;
+    let dateSortKey = dateRaw;
+    const dParsed   = new Date(dateRaw);
+    if (!isNaN(dParsed)) {
+      const dd = String(dParsed.getDate()).padStart(2, '0');
+      const mm = String(dParsed.getMonth() + 1).padStart(2, '0');
+      const yyyy = dParsed.getFullYear();
+      dateStr     = `${dd}.${mm}.${yyyy}`;
+      dateSortKey = `${yyyy}${mm}${dd}`;
+    } else {
+      // уже в формате DD.MM.YYYY
+      const parts = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+      if (parts) dateSortKey = `${parts[3]}${parts[2]}${parts[1]}`;
     }
 
-    if (!grouped[obj]) grouped[obj] = { supplier, orders: [] };
-
-    let status;
-    if (acceptedNums.has(num))    status = '✅';
-    else if (errorNums.has(num))  status = '❌';
-    else                          status = '⏳';
-
-    grouped[obj].orders.push({ num: row[2], status });
+    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
   }
 
-  // Формируем итог
-  return Object.entries(grouped).map(([object, { supplier, orders }]) => {
-    const accepted    = orders.filter(o => o.status === '✅').length;
-    const errors      = orders.filter(o => o.status === '❌').length;
-    const notAccepted = orders.filter(o => o.status === '⏳').length;
-    return { object, supplier, total: orders.length, accepted, errors, notAccepted, orders };
-  });
+  return pending;
 }
 
 /**
- * Форматирует один объект в текст для Telegram
+ * Строит текст сообщения из списка непринятых строк.
+ * Группирует: Поставщик → Дата (новые сверху) → Объекты
  */
-function formatObjectStatus(item, detailed = false) {
-  let text = `*${escMd(item.object)}*\n`;
-  if (item.supplier) text += `_${escMd(item.supplier)}_\n`;
-  text += `Всего: ${item.total} | ✅ ${item.accepted} | ❌ ${item.errors} | ⏳ ${item.notAccepted}\n`;
-
-  if (detailed && item.orders.length <= 20) {
-    item.orders.forEach(o => {
-      text += `  ${o.status} ${escMd(o.num)}\n`;
-    });
+function buildPendingText(pending, title) {
+  // supplier → dateSortKey → { dateStr, objects[] }
+  const bySupplier = {};
+  for (const { supplier, dateStr, dateSortKey, object, status } of pending) {
+    if (!bySupplier[supplier]) bySupplier[supplier] = {};
+    if (!bySupplier[supplier][dateSortKey]) {
+      bySupplier[supplier][dateSortKey] = { dateStr, objects: [] };
+    }
+    bySupplier[supplier][dateSortKey].objects.push({ object, status });
   }
+
+  let text = `*${escMd(title)}*\n`;
+
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+
+    const dateKeys = Object.keys(bySupplier[supplier]).sort().reverse(); // новые сверху
+    for (const dk of dateKeys) {
+      const { dateStr, objects } = bySupplier[supplier][dk];
+      text += `Дата ${escMd(dateStr)}\n`;
+      for (const { object, status } of objects) {
+        text += `${status} ${escMd(object)}\n`;
+      }
+    }
+  }
+
   return text;
 }
 
@@ -190,35 +205,15 @@ function formatObjectStatus(item, detailed = false) {
 async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
   await sendTyping(cfg, chatId, threadId);
 
-  const data = await getStatusData(cfg, objectQuery);
+  const pending = await getPendingOrders(cfg, objectQuery);
 
-  if (data.length === 0) {
+  if (pending.length === 0) {
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `Объект *${escMd(objectQuery)}* не найден в таблице.`, threadId, 0);
+      `✅ Для объекта *${escMd(objectQuery)}* все накладные приняты.`, threadId, 0);
     return;
   }
 
-  let text = `📊 *${escMd(objectQuery)}*\n\n`;
-
-  data.forEach(item => {
-    text += `*${escMd(item.object)}*`;
-    if (item.supplier) text += ` — _${escMd(item.supplier)}_`;
-    text += `\nВсего: ${item.total} | ✅${item.accepted} ❌${item.errors} ⏳${item.notAccepted}\n`;
-
-    // Показываем только непринятые заказы
-    const pending = item.orders.filter(o => o.status !== '✅');
-    if (pending.length > 0 && pending.length <= 30) {
-      pending.forEach(o => {
-        text += `  ${o.status} ${escMd(o.num)}\n`;
-      });
-    }
-
-    if (item.notAccepted === 0 && item.errors === 0) {
-      text += `  ✅ Все оприходованы\n`;
-    }
-    text += '\n';
-  });
-
+  const text = buildPendingText(pending, `Не принятые накладные — ${objectQuery}`);
   await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
 
@@ -228,63 +223,31 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
 async function handleStatusAllCommand(chatId, threadId, cfg) {
   await sendTyping(cfg, chatId, threadId);
 
-  const data = await getStatusData(cfg, null);
+  const pending = await getPendingOrders(cfg, null);
 
-  if (data.length === 0) {
+  if (pending.length === 0) {
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      'Нет данных в листе «Отправлен».', threadId, 0);
+      '✅ Все накладные приняты.', threadId, 0);
     return;
   }
 
-  // Суммарная статистика
-  const totalAll    = data.reduce((s, i) => s + i.total, 0);
-  const acceptedAll = data.reduce((s, i) => s + i.accepted, 0);
-  const errorsAll   = data.reduce((s, i) => s + i.errors, 0);
-  const pendingAll  = data.reduce((s, i) => s + i.notAccepted, 0);
-
-  // Группируем по поставщику
+  // Если текст большой — разбиваем по поставщикам
   const bySupplier = {};
-  data.forEach(item => {
-    const key = item.supplier || 'Без поставщика';
-    if (!bySupplier[key]) bySupplier[key] = [];
-    bySupplier[key].push(item);
-  });
+  for (const item of pending) {
+    if (!bySupplier[item.supplier]) bySupplier[item.supplier] = [];
+    bySupplier[item.supplier].push(item);
+  }
 
-  let text = `📊 *Не принятые заказы*\n`;
-  text += `Всего: ${totalAll} | ✅ ${acceptedAll} | ❌ ${errorsAll} | ⏳ ${pendingAll}\n`;
+  let text = `*Не принятые накладные*\n`;
 
-  for (const [supplier, items] of Object.entries(bySupplier)) {
-    // Объекты у которых есть непринятые или ошибки
-    const problemItems = items.filter(i => i.notAccepted > 0 || i.errors > 0);
-
-    // Если все объекты поставщика приняты — пропускаем его
-    if (problemItems.length === 0) continue;
-
-    const supTotal    = items.reduce((s, i) => s + i.total, 0);
-    const supAccepted = items.reduce((s, i) => s + i.accepted, 0);
-    const supErrors   = items.reduce((s, i) => s + i.errors, 0);
-    const supPending  = items.reduce((s, i) => s + i.notAccepted, 0);
-
-    text += `\n*${escMd(supplier)}*`;
-    text += ` (${supTotal} зак. | ✅${supAccepted} ❌${supErrors} ⏳${supPending})\n`;
-
-    // Список непринятых объектов
-    problemItems.forEach(item => {
-      let line = `  • ${escMd(item.object)}`;
-      if (item.errors > 0)      line += ` ❌${item.errors}`;
-      if (item.notAccepted > 0) line += ` ⏳${item.notAccepted}`;
-      text += line + '\n';
-    });
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    const chunk = buildPendingText(bySupplier[supplier], supplier).replace(/^\*[^\n]+\n/, '');
+    text += `\n*${escMd(supplier)}*\n${chunk}`;
 
     if (text.length > 3500) {
       await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
       text = '';
     }
-  }
-
-  // Если все приняты
-  if (pendingAll === 0 && errorsAll === 0) {
-    text += '\n✅ Все заказы оприходованы!';
   }
 
   if (text.trim()) {
