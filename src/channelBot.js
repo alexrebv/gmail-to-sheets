@@ -302,23 +302,17 @@ async function sendEndDaySummary(chatId, threadId, cfg) {
     return;
   }
 
-  // Группируем: supplier → object → count
-  const bySupplier = {};
-  for (const { supplier, object } of pending) {
-    if (!bySupplier[supplier]) bySupplier[supplier] = {};
-    bySupplier[supplier][object] = (bySupplier[supplier][object] || 0) + 1;
+  // Считаем количество непринятых по каждому объекту
+  const byObject = {};
+  for (const { object } of pending) {
+    byObject[object] = (byObject[object] || 0) + 1;
   }
 
   const total = pending.length;
-  let text = `*Итог дня ${escMd(dateLabel)}*\nНе принято накладных: ${total}\n`;
+  let text = `*Итог дня ${escMd(dateLabel)}*\nНе принято накладных: ${total}\n\n`;
 
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    text += `\n*${escMd(supplier)}*\n`;
-    const objects = bySupplier[supplier];
-    for (const obj of Object.keys(objects).sort()) {
-      const cnt = objects[obj];
-      text += `${escMd(obj)} — ${cnt}\n`;
-    }
+  for (const obj of Object.keys(byObject).sort()) {
+    text += `${escMd(obj)} — ${byObject[obj]}\n`;
 
     if (text.length > 3500) {
       await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
