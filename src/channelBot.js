@@ -182,37 +182,31 @@ async function getPendingOrders(cfg, objectFilter = null) {
   return pending;
 }
 
-/**
- * Строит текст сообщения из списка непринятых строк.
- * Группирует: Поставщик → Дата (новые сверху) → Объекты
- */
-function buildPendingText(pending, title) {
-  // supplier → dateSortKey → { dateStr, objects[] }
+/** Форматирует блок дат → объекты (без эмодзи, без названия поставщика) */
+function buildDatesText(dateMap) {
+  let text = '';
+  const dateKeys = Object.keys(dateMap).sort().reverse(); // новые сверху
+  for (const dk of dateKeys) {
+    const { dateStr, objects } = dateMap[dk];
+    text += `Дата ${escMd(dateStr)}\n`;
+    for (const { object } of objects) {
+      text += `${escMd(object)}\n`;
+    }
+  }
+  return text;
+}
+
+/** Группирует pending по поставщику → dateMap */
+function groupBySupplier(pending) {
   const bySupplier = {};
-  for (const { supplier, dateStr, dateSortKey, object, status } of pending) {
+  for (const { supplier, dateStr, dateSortKey, object } of pending) {
     if (!bySupplier[supplier]) bySupplier[supplier] = {};
     if (!bySupplier[supplier][dateSortKey]) {
       bySupplier[supplier][dateSortKey] = { dateStr, objects: [] };
     }
-    bySupplier[supplier][dateSortKey].objects.push({ object, status });
+    bySupplier[supplier][dateSortKey].objects.push({ object });
   }
-
-  let text = `*${escMd(title)}*\n`;
-
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    text += `\n*${escMd(supplier)}*\n`;
-
-    const dateKeys = Object.keys(bySupplier[supplier]).sort().reverse(); // новые сверху
-    for (const dk of dateKeys) {
-      const { dateStr, objects } = bySupplier[supplier][dk];
-      text += `Дата ${escMd(dateStr)}\n`;
-      for (const { object, status } of objects) {
-        text += `${status} ${escMd(object)}\n`;
-      }
-    }
-  }
-
-  return text;
+  return bySupplier;
 }
 
 /**
@@ -229,7 +223,14 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
     return;
   }
 
-  const text = buildPendingText(pending, `Не принятые накладные — ${objectQuery}`);
+  const bySupplier = groupBySupplier(pending);
+  let text = `*Не принятые накладные — ${escMd(objectQuery)}*\n`;
+
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+    text += buildDatesText(bySupplier[supplier]);
+  }
+
   await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
 
@@ -247,18 +248,12 @@ async function handleStatusAllCommand(chatId, threadId, cfg) {
     return;
   }
 
-  // Если текст большой — разбиваем по поставщикам
-  const bySupplier = {};
-  for (const item of pending) {
-    if (!bySupplier[item.supplier]) bySupplier[item.supplier] = [];
-    bySupplier[item.supplier].push(item);
-  }
-
+  const bySupplier = groupBySupplier(pending);
   let text = `*Не принятые накладные*\n`;
 
   for (const supplier of Object.keys(bySupplier).sort()) {
-    const chunk = buildPendingText(bySupplier[supplier], supplier).replace(/^\*[^\n]+\n/, '');
-    text += `\n*${escMd(supplier)}*\n${chunk}`;
+    text += `\n*${escMd(supplier)}*\n`;
+    text += buildDatesText(bySupplier[supplier]);
 
     if (text.length > 3500) {
       await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
