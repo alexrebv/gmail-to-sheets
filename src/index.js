@@ -46,7 +46,8 @@ async function start() {
   const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
 
   const TZ = cfg.TIMEZONE || 'Europe/Moscow';
-  const cronOpts = { timezone: TZ };
+  // process.env.TZ уже установлен в начале файла, { timezone } в cron не передаём
+  // чтобы не было двойного пересчёта времени
 
   console.log(`  Gmail reader   : ${cronGmail} (${TZ})`);
   console.log(`  Send orders TG : ${cronSendOrders}`);
@@ -56,11 +57,11 @@ async function start() {
   // 3. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
 
-  // 4. Cron-задачи
-  cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders),  cronOpts);
-  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram), cronOpts);
-  cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify), cronOpts);
-  cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary), cronOpts);
+  // 4. Cron-задачи — timezone берётся из process.env.TZ, без опции { timezone }
+  cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
+  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
+  cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
+  cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary));
 }
 
 async function runEndDaySummary() {
