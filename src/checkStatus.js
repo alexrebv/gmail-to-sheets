@@ -115,6 +115,9 @@ async function updateOrderStatusAndNotify() {
     if (!obj || !numRaw || !dateRaw) continue;
     if (archFlag.startsWith('Архив')) continue;
 
+    const accStatus = disp(row[COL.SENT.ACC_STATUS]);
+    if (accStatus.startsWith('❌')) continue; // удалено вручную / ошибка IIKO
+
     const dateParts = parseDateStr(dateRaw);
     if (!dateParts) continue;
     const { dd: pdd, mm: pmm, yyyy: pyyyy } = dateParts;
@@ -149,8 +152,7 @@ async function updateOrderStatusAndNotify() {
       accUpdates.push({ range: `'${SH_ACC}'!I${errIdx + 2}`, values: [['Ошибка проверена']] });
       sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['❌ Ошибка регистрации']] });
     } else {
-      const currStatus = disp(row[COL.SENT.ACC_STATUS]);
-      if (!currStatus) {
+      if (!accStatus) {
         sentUpdates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['⏳ Не оприходовано']] });
       }
     }

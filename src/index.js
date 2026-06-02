@@ -9,6 +9,11 @@
  */
 
 require('dotenv').config();
+
+// Устанавливаем timezone процесса ДО всех require и cron-задач.
+// Это гарантирует что new Date() и node-cron работают в московском времени.
+process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
+
 const cron = require('node-cron');
 const { processGmailOrders }         = require('./gmail');
 const { sendOrdersToTelegram }       = require('./sendOrders');
