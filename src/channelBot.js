@@ -514,6 +514,65 @@ async function sendTyping(cfg, chatId, threadId = null) {
   });
 }
 
+/**
+ * Отправляет в Telegram список сегодняшних заказов из «Отправлен»,
+ * сгруппированных по поставщику.
+ * Вызывается по расписанию CRON_BUY (12–16 ч).
+ */
+async function sendTodayOrders(chatId, threadId, cfg) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${SH_SENT}'!A2:L`,
+  });
+
+  const rows = res.data.values || [];
+  const { dd, mm, yyyy } = require('./dateUtils').parseDateStr(new Date().toISOString()) ||
+    (() => { const t = new Date(); return { dd: String(t.getDate()).padStart(2,'0'), mm: String(t.getMonth()+1).padStart(2,'0'), yyyy: String(t.getFullYear()) }; })();
+  const todayKey = `${yyyy}${mm}${dd}`;
+  const dateLabel = `${dd}.${mm}.${yyyy.slice(-2)}`;
+
+  // Группируем по поставщику
+  const bySupplier = {}; // supplier → [obj, ...]
+
+  for (const row of rows) {
+    const obj      = cleanObjectName((row[1] || '').toString().trim()); // B
+    const supplier = (row[4] || '').toString().trim();                  // E
+    const dateRaw  = (row[5] || '').toString().trim();                  // F — Дата отправки
+    if (!obj || !supplier || !dateRaw) continue;
+
+    const parsed = parseDateStr(dateRaw);
+    if (!parsed) continue;
+    const rowKey = `${parsed.yyyy}${parsed.mm}${parsed.dd}`;
+    if (rowKey !== todayKey) continue; // только сегодняшние
+
+    if (!bySupplier[supplier]) bySupplier[supplier] = [];
+    bySupplier[supplier].push(obj);
+  }
+
+  const suppliers = Object.keys(bySupplier).sort();
+  if (suppliers.length === 0) {
+    console.log('[sendTodayOrders] Сегодняшних заказов нет.');
+    return;
+  }
+
+  let text = `*Дата заказа ${escMd(dateLabel)}*\nЗаказ отправлен по поставщику:\n`;
+  for (const supplier of suppliers) {
+    text += `\n*${escMd(supplier)}*\n`;
+    for (const obj of bySupplier[supplier]) {
+      text += `${escMd(obj)}\n`;
+    }
+  }
+
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+  console.log(`[sendTodayOrders] Отправлено поставщиков: ${suppliers.length}`);
+}
+
 function escMd(s) {
   return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
@@ -687,4 +746,4 @@ async function startChannelBot() {
   }
 }
 
-module.exports = { startChannelBot, parseChannelMessage, sendEndDaySummary };
+module.exports = { startChannelBot, parseChannelMessage, sendEndDaySummary, sendTodayOrders };

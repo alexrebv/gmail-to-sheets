@@ -18,13 +18,14 @@ const cron = require('node-cron');
 const { processGmailOrders }         = require('./gmail');
 const { sendOrdersToTelegram }       = require('./sendOrders');
 const { updateOrderStatusAndNotify } = require('./checkStatus');
-const { startChannelBot, sendEndDaySummary } = require('./channelBot');
+const { startChannelBot, sendEndDaySummary, sendTodayOrders } = require('./channelBot');
 const { getConfig }                          = require('./config');
 
 const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
 const DEFAULT_CRON_END_DAY     = '30 22 * * *';
+const DEFAULT_CRON_BUY         = '0 12,13,14,15,16 * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
@@ -44,6 +45,7 @@ async function start() {
   const cronSendOrders = cfg.CRON_SEND_ORDERS || DEFAULT_CRON_SEND_ORDERS;
   const cronStatus     = cfg.CRON_STATUS      || DEFAULT_CRON_STATUS;
   const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
+  const cronBuy        = cfg.CRON_BUY         || DEFAULT_CRON_BUY;
 
   const TZ = cfg.TIMEZONE || 'Europe/Moscow';
   // process.env.TZ уже установлен в начале файла, { timezone } в cron не передаём
@@ -53,6 +55,7 @@ async function start() {
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
   console.log(`  End day summary: ${cronEndDay}`);
+  console.log(`  Today orders   : ${cronBuy}`);
 
   // 3. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
@@ -62,6 +65,16 @@ async function start() {
   cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
   cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary));
+  cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));
+}
+
+async function runTodayOrders() {
+  const cfg = await getConfig();
+  if (!cfg.TELEGRAM_TOKEN || !cfg.TELEGRAM_CHAT_ID) {
+    console.warn('[today_orders] TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не заданы');
+    return;
+  }
+  await sendTodayOrders(cfg.TELEGRAM_CHAT_ID, cfg.TELEGRAM_THREAD_ID || null, cfg);
 }
 
 async function runEndDaySummary() {
