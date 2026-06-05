@@ -17,8 +17,6 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
-const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
-const { parseDateStr, todayDateKey } = require('./dateUtils');
 
 const app = express();
 app.use(express.json());
@@ -26,8 +24,8 @@ app.use(express.json());
 // ── Regex для парсинга сообщений канала ───────────────────────────────────────
 
 const RE_ACCEPTED = /Заказ\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+был\s+оприходован/i;
-const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
-const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой/i;
+const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
+const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой/i;
 
 function cleanObjectName(name) {
   return (name || '').replace(/\s+(ФГ|ДР|DR|DP|GSW)\s*$/i, '').trim();
@@ -51,24 +49,6 @@ function parseChannelMessage(text) {
 
 // ── Запись в лист «Принят» ────────────────────────────────────────────────────
 
-/** Retry с экспоненциальным backoff для вызовов Google API */
-async function withRetry(fn, label, maxAttempts = 4) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const retryable = err.code === 429 || err.code === 503 || (err.status >= 500 && err.status < 600);
-      if (attempt < maxAttempts && retryable) {
-        const delay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-        console.warn(`[${label}] Попытка ${attempt} не удалась (${err.code || err.status}), повтор через ${delay}мс`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
 async function writeToSheet(parsed, rawText, cfg) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SHEET_NAME     = cfg.SHEET_ACCEPTED || 'Принят';
@@ -81,10 +61,10 @@ async function writeToSheet(parsed, rawText, cfg) {
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
 
-  const colC = await withRetry(() => sheets.spreadsheets.values.get({
+  const colC = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!C:C`,
-  }), 'writeToSheet.get');
+  });
   const colValues = colC.data.values || [];
   let lastRow = 1;
   for (let i = colValues.length - 1; i >= 0; i--) {
@@ -97,7 +77,7 @@ async function writeToSheet(parsed, rawText, cfg) {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 
-  await withRetry(() => sheets.spreadsheets.values.update({
+  await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!A${lastRow + 1}`,
     valueInputOption: 'USER_ENTERED',
@@ -105,170 +85,9 @@ async function writeToSheet(parsed, rawText, cfg) {
       now, parsed.supplier, parsed.orderNumber, parsed.type,
       parsed.deliveryDate, parsed.object, rawText.substring(0, 500), '', '',
     ]] },
-  }), 'writeToSheet.write');
+  });
 
   console.log(`[channelBot] ✓ ${parsed.type} | ${parsed.orderNumber} | ${parsed.object} | ${parsed.supplier}`);
-
-  // Если ошибка регистрации — сразу уведомить в чат и пометить в «Отправлен»
-  if (parsed.type === 'Ошибка') {
-    await markErrorInSent(parsed, cfg);
-    await notifyIikoError(parsed, cfg);
-  }
-}
-
-/** Помечает строку в «Отправлен» статусом ❌ Ошибка IIKO по номеру заказа */
-async function markErrorInSent(parsed, cfg) {
-  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
-  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
-
-  const auth   = await getAuthClient();
-  const sheets = getSheetsClient(auth);
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `'${SH_SENT}'!A2:K`,
-  });
-  const rows = res.data.values || [];
-
-  const targetNum = norm(parsed.orderNumber);
-  const updates   = [];
-
-  rows.forEach((row, i) => {
-    if (norm(row[2]) === targetNum) {
-      updates.push({ range: `'${SH_SENT}'!K${i + 2}`, values: [['❌ Ошибка IIKO']] });
-    }
-  });
-
-  if (updates.length > 0) {
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SPREADSHEET_ID,
-      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
-    });
-    console.log(`[channelBot] Помечено ошибкой IIKO: ${parsed.orderNumber}`);
-  }
-}
-
-/** Отправляет уведомление об ошибке регистрации в IIKO */
-async function notifyIikoError(parsed, cfg) {
-  const token    = cfg.TELEGRAM_TOKEN;
-  const chatId   = cfg.TELEGRAM_CHAT_ID;
-  const threadId = cfg.TELEGRAM_THREAD_ID || null;
-  if (!token || !chatId) return;
-
-  const text =
-    `❌ *Не упало в IIKO\\!*\n` +
-    `Объект: ${escMd(parsed.object)}\n` +
-    `Поставщик: ${escMd(parsed.supplier)}\n` +
-    `Номер накладной: ${escMd(parsed.orderNumber)}\n` +
-    `Дата поставки: ${escMd(parsed.deliveryDate)}`;
-
-  await sendMessage(token, chatId, text, threadId, 0);
-}
-
-/** Сканирует лист «Принят» на Ошибка-записи, помечает «Отправлен» и уведомляет */
-async function processIikoErrors(cfg) {
-  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-  const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
-  const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
-  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().trim();
-
-  const auth   = await getAuthClient();
-  const sheets = getSheetsClient(auth);
-
-  const [sentRes, accRes] = await Promise.all([
-    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:K` }),
-    sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_ACC}'!A2:G` }),
-  ]);
-
-  const sentRows = sentRes.data.values || [];
-  const accRows  = accRes.data.values  || [];
-
-  // Индекс строк «Отправлен» по номеру заказа
-  const sentIndex = {}; // norm(num) → { rowNum, accStatus, obj, supplier }
-  sentRows.forEach((row, i) => {
-    const num = norm(row[2]);
-    if (num) sentIndex[num] = { rowNum: i + 2, accStatus: (row[10] || '').toString().trim(), obj: row[1], supplier: row[4] };
-  });
-
-  const updates  = [];
-  const toNotify = [];
-
-  accRows.forEach(row => {
-    const num  = norm(row[2]);                       // C — номер
-    const type = (row[3] || '').toString().trim();   // D — тип
-    if (type !== 'Ошибка' || !num) return;
-
-    const sent = sentIndex[num];
-    if (!sent) return;
-    if (sent.accStatus.startsWith('❌')) return; // уже помечено
-
-    updates.push({ range: `'${SH_SENT}'!K${sent.rowNum}`, values: [['❌ Ошибка IIKO']] });
-    toNotify.push({
-      orderNumber:  row[2],                          // C — оригинальный номер
-      object:       cleanObjectName((row[5] || '').toString().trim()), // F
-      supplier:     (row[1] || '').toString().trim(), // B
-      deliveryDate: (row[4] || '').toString().trim(), // E
-    });
-  });
-
-  if (updates.length > 0) {
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SPREADSHEET_ID,
-      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
-    });
-    console.log(`[processIikoErrors] Помечено: ${updates.length}`);
-  }
-
-  for (const p of toNotify) {
-    await notifyIikoError(p, cfg);
-  }
-
-  return toNotify.length;
-}
-
-/** Удаляет накладную из оборота по объекту и номеру заказа */
-async function deleteOrderFromNotifications(chatId, threadId, objectQuery, orderNum, cfg) {
-  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
-  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().replace(/^#/, '').trim();
-
-  const auth   = await getAuthClient();
-  const sheets = getSheetsClient(auth);
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `'${SH_SENT}'!A2:K`,
-  });
-  const rows = res.data.values || [];
-
-  const targetNum = norm(orderNum);
-  const updates   = [];
-
-  rows.forEach((row, i) => {
-    const rowNum = i + 2;
-    const obj    = cleanObjectName((row[1] || '').toString().trim());
-    const num    = norm(row[2]);
-    if (num !== targetNum) return;
-    if (objectQuery && !norm(obj).includes(norm(objectQuery))) return;
-
-    updates.push({ range: `'${SH_SENT}'!K${rowNum}`, values: [['❌ Удалено вручную']] });
-  });
-
-  if (updates.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `Накладная ${escMd(orderNum)} не найдена в «Отправлен».`, threadId, 0);
-    return;
-  }
-
-  await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
-  });
-
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-    `✅ Накладная ${escMd(orderNum)} убрана из оповещений.`, threadId, 0);
-  console.log(`[delete] Удалено из оборота: ${orderNum}`);
 }
 
 // ── Команды /status и /status_all ─────────────────────────────────────────────
@@ -280,7 +99,7 @@ async function deleteOrderFromNotifications(chatId, threadId, objectQuery, order
  * Возвращает массив: [{ supplier, dateStr, dateSortKey, object, status }]
  * status: '⏳' — не оприходовано, '❌' — ошибка регистрации
  */
-async function getPendingOrders(cfg, objectFilter = null, supplierFilter = null) {
+async function getPendingOrders(cfg, objectFilter = null) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
@@ -317,102 +136,101 @@ async function getPendingOrders(cfg, objectFilter = null, supplierFilter = null)
     const dateRaw  = (row[5] || '').toString().trim();                   // F — Дата отправки
     const archive  = (row[11] || '').toString().trim();                  // L
 
-    const accStatus = (row[10] || '').toString().trim(); // K — Статус приёмки
-
     if (!obj || !num) continue;
     if (archive.startsWith('Архив')) continue;
-    if (acceptedNums.has(num)) continue;          // принято
-    if (accStatus.startsWith('❌')) continue;      // ошибка IIKO / удалено вручную
+    if (acceptedNums.has(num)) continue; // принято — не показываем
 
-    if (objectFilter  && !norm(obj).includes(norm(objectFilter))) continue;
-    if (supplierFilter && !norm(supplier).includes(norm(supplierFilter))) continue;
+    if (objectFilter && !norm(obj).includes(norm(objectFilter))) continue;
 
     const status = errorNums.has(num) ? '❌' : '⏳';
 
-    // Парсим дату строкой — без new Date() во избежание UTC-сдвига
-    // Поддерживаемые форматы:
-    //   2026-05-31 11:50:00   (ISO-like)
-    //   31.05.2026, 11:50     (русский с запятой)
-    //   31.05.2026            (русский без времени)
-    const parsed = parseDateStr(dateRaw);
-    if (!parsed) continue;
+    // Нормализуем дату к DD.MM.YY для отображения и к YYYYMMDD для сортировки
+    let dateStr     = dateRaw;
+    let dateSortKey = dateRaw;
+    const dParsed   = new Date(dateRaw);
+    if (!isNaN(dParsed)) {
+      const dMidnight = new Date(dParsed);
+      dMidnight.setHours(0, 0, 0, 0);
+      const todayMidnight = new Date();
+      todayMidnight.setHours(0, 0, 0, 0);
+      if (dMidnight >= todayMidnight) continue; // сегодняшние — не показываем
 
-    const { dd, mm, yyyy } = parsed;
-    const todayKey = todayDateKey();
-    const sortKey  = `${yyyy}${mm}${dd}`;
-    if (sortKey >= todayKey) continue; // сегодняшние — не показываем
+      const dd   = String(dParsed.getDate()).padStart(2, '0');
+      const mm   = String(dParsed.getMonth() + 1).padStart(2, '0');
+      const yy   = String(dParsed.getFullYear()).slice(-2);
+      const yyyy = dParsed.getFullYear();
+      dateStr     = `${dd}.${mm}.${yy}`;
+      dateSortKey = `${yyyy}${mm}${dd}`;
+    } else {
+      // уже в формате DD.MM.YYYY или DD.MM.YY
+      const parts4 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+      const parts2 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
+      if (parts4) {
+        const todayStr = (() => { const t = new Date(); t.setHours(0,0,0,0); return t; })();
+        const d = new Date(`${parts4[3]}-${parts4[2]}-${parts4[1]}`);
+        if (d >= todayStr) continue;
+        dateSortKey = `${parts4[3]}${parts4[2]}${parts4[1]}`;
+        dateStr = `${parts4[1]}.${parts4[2]}.${String(parts4[3]).slice(-2)}`;
+      } else if (parts2) {
+        dateSortKey = `20${parts2[3]}${parts2[2]}${parts2[1]}`;
+      }
+    }
 
-    const yy = yyyy.slice(-2);
-    const dateStr     = `${dd}.${mm}.${yy}`;
-    const dateSortKey = sortKey;
-
-    const rawNum = (row[2] || '').toString().trim(); // C — оригинальный номер
-    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status, orderNum: rawNum });
+    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
   }
 
   return pending;
 }
 
 /**
- * Форматирует блок дат → строки.
- * showObject=true  (status_all): "Объект #номер"
- * showObject=false (status obj): "#номер"
+ * Строит текст сообщения из списка непринятых строк.
+ * Группирует: Поставщик → Дата (новые сверху) → Объекты
  */
-function buildDatesText(dateMap, showObject = true) {
-  let text = '';
-  const dateKeys = Object.keys(dateMap).sort().reverse(); // новые сверху
-  for (const dk of dateKeys) {
-    const { dateStr, objects } = dateMap[dk];
-    text += `Дата ${escMd(dateStr)}\n`;
-    for (const { object, orderNum } of objects) {
-      const numStr = orderNum ? ` ${escMd(orderNum)}` : '';
-      text += showObject ? `${escMd(object)}${numStr}\n` : `${numStr.trim()}\n`;
-    }
-  }
-  return text;
-}
-
-/** Группирует pending по поставщику → dateMap */
-function groupBySupplier(pending) {
+function buildPendingText(pending, title) {
+  // supplier → dateSortKey → { dateStr, objects[] }
   const bySupplier = {};
-  for (const { supplier, dateStr, dateSortKey, object, orderNum } of pending) {
+  for (const { supplier, dateStr, dateSortKey, object, status } of pending) {
     if (!bySupplier[supplier]) bySupplier[supplier] = {};
     if (!bySupplier[supplier][dateSortKey]) {
       bySupplier[supplier][dateSortKey] = { dateStr, objects: [] };
     }
-    bySupplier[supplier][dateSortKey].objects.push({ object, orderNum });
+    bySupplier[supplier][dateSortKey].objects.push({ object, status });
   }
-  return bySupplier;
+
+  let text = `*${escMd(title)}*\n`;
+
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+
+    const dateKeys = Object.keys(bySupplier[supplier]).sort().reverse(); // новые сверху
+    for (const dk of dateKeys) {
+      const { dateStr, objects } = bySupplier[supplier][dk];
+      text += `Дата ${escMd(dateStr)}\n`;
+      for (const { object, status } of objects) {
+        text += `${status} ${escMd(object)}\n`;
+      }
+    }
+  }
+
+  return text;
 }
 
 /**
- * Обрабатывает команду /status <объект[, объект2, ...]>
+ * Обрабатывает команду /status <объект>
  */
 async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
   await sendTyping(cfg, chatId, threadId);
 
-  // Разбиваем по запятой — поддержка нескольких объектов
-  const queries = objectQuery.split(',').map(s => s.trim()).filter(Boolean);
+  const pending = await getPendingOrders(cfg, objectQuery);
 
-  for (const query of queries) {
-    const pending = await getPendingOrders(cfg, query);
-
-    if (pending.length === 0) {
-      await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-        `✅ *${escMd(query)}* — все накладные приняты.`, threadId, 0);
-      continue;
-    }
-
-    const bySupplier = groupBySupplier(pending);
-    let text = `*Не принятые накладные — ${escMd(query)}*\n`;
-
-    for (const supplier of Object.keys(bySupplier).sort()) {
-      text += `\n*${escMd(supplier)}*\n`;
-      text += buildDatesText(bySupplier[supplier], false); // объект уже в заголовке
-    }
-
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+  if (pending.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+      `✅ Для объекта *${escMd(objectQuery)}* все накладные приняты.`, threadId, 0);
+    return;
   }
+
+  const text = buildPendingText(pending, `Не принятые накладные — ${objectQuery}`);
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
 }
 
 /**
@@ -420,65 +238,27 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
  */
 async function handleStatusAllCommand(chatId, threadId, cfg) {
   await sendTyping(cfg, chatId, threadId);
-  const { sendPendingReport } = require('./pendingReport');
-  await sendPendingReport(chatId, threadId, cfg);
-}
 
-/**
- * /time_sup {поставщик} — все непринятые накладные по конкретному поставщику
- */
-async function handleStatusSupplierCommand(chatId, threadId, supplierQuery, cfg) {
-  await sendTyping(cfg, chatId, threadId);
-
-  const pending = await getPendingOrders(cfg, null, supplierQuery);
-
-  if (pending.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `✅ *${escMd(supplierQuery)}* — все накладные приняты.`, threadId, 0);
-    return;
-  }
-
-  const bySupplier = groupBySupplier(pending);
-  let text = `*Не принятые накладные — ${escMd(supplierQuery)}*\n`;
-
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    text += `\n*${escMd(supplier)}*\n`;
-    text += buildDatesText(bySupplier[supplier], true);
-  }
-
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-}
-
-/**
- * Итог дня: по каждому объекту — сколько накладных не принято.
- * Группировка: Поставщик → список объектов с количеством.
- */
-async function sendEndDaySummary(chatId, threadId, cfg) {
   const pending = await getPendingOrders(cfg, null);
 
-  const today = new Date();
-  const dd = String(today.getDate()).padStart(2, '0');
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const yy = String(today.getFullYear()).slice(-2);
-  const dateLabel = `${dd}.${mm}.${yy}`;
-
   if (pending.length === 0) {
     await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      `✅ *Итог дня ${escMd(dateLabel)}*\nВсе накладные приняты.`, threadId, 0);
+      '✅ Все накладные приняты.', threadId, 0);
     return;
   }
 
-  // Считаем количество непринятых по каждому объекту
-  const byObject = {};
-  for (const { object } of pending) {
-    byObject[object] = (byObject[object] || 0) + 1;
+  // Если текст большой — разбиваем по поставщикам
+  const bySupplier = {};
+  for (const item of pending) {
+    if (!bySupplier[item.supplier]) bySupplier[item.supplier] = [];
+    bySupplier[item.supplier].push(item);
   }
 
-  const total = pending.length;
-  let text = `*Итог дня ${escMd(dateLabel)}*\nНе принято накладных: ${total}\n\n`;
+  let text = `*Не принятые накладные*\n`;
 
-  for (const obj of Object.keys(byObject).sort()) {
-    text += `${escMd(obj)} — ${byObject[obj]}\n`;
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    const chunk = buildPendingText(bySupplier[supplier], supplier).replace(/^\*[^\n]+\n/, '');
+    text += `\n*${escMd(supplier)}*\n${chunk}`;
 
     if (text.length > 3500) {
       await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
@@ -510,65 +290,6 @@ async function sendTyping(cfg, chatId, threadId = null) {
   });
 }
 
-/**
- * Отправляет в Telegram список сегодняшних заказов из «Отправлен»,
- * сгруппированных по поставщику.
- * Вызывается по расписанию CRON_BUY (12–16 ч).
- */
-async function sendTodayOrders(chatId, threadId, cfg) {
-  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
-
-  const auth   = await getAuthClient();
-  const sheets = getSheetsClient(auth);
-
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `'${SH_SENT}'!A2:L`,
-  });
-
-  const rows = res.data.values || [];
-  const { dd, mm, yyyy } = require('./dateUtils').parseDateStr(new Date().toISOString()) ||
-    (() => { const t = new Date(); return { dd: String(t.getDate()).padStart(2,'0'), mm: String(t.getMonth()+1).padStart(2,'0'), yyyy: String(t.getFullYear()) }; })();
-  const todayKey = `${yyyy}${mm}${dd}`;
-  const dateLabel = `${dd}.${mm}.${yyyy.slice(-2)}`;
-
-  // Группируем по поставщику
-  const bySupplier = {}; // supplier → [obj, ...]
-
-  for (const row of rows) {
-    const obj      = cleanObjectName((row[1] || '').toString().trim()); // B
-    const supplier = (row[4] || '').toString().trim();                  // E
-    const dateRaw  = (row[5] || '').toString().trim();                  // F — Дата отправки
-    if (!obj || !supplier || !dateRaw) continue;
-
-    const parsed = parseDateStr(dateRaw);
-    if (!parsed) continue;
-    const rowKey = `${parsed.yyyy}${parsed.mm}${parsed.dd}`;
-    if (rowKey !== todayKey) continue; // только сегодняшние
-
-    if (!bySupplier[supplier]) bySupplier[supplier] = [];
-    bySupplier[supplier].push(obj);
-  }
-
-  const suppliers = Object.keys(bySupplier).sort();
-  if (suppliers.length === 0) {
-    console.log('[sendTodayOrders] Сегодняшних заказов нет.');
-    return;
-  }
-
-  let text = `*Дата заказа ${escMd(dateLabel)}*\nЗаказ отправлен по поставщику:\n`;
-  for (const supplier of suppliers) {
-    text += `\n*${escMd(supplier)}*\n`;
-    for (const obj of bySupplier[supplier]) {
-      text += `${escMd(obj)}\n`;
-    }
-  }
-
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-  console.log(`[sendTodayOrders] Отправлено поставщиков: ${suppliers.length}`);
-}
-
 function escMd(s) {
   return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
@@ -582,33 +303,13 @@ app.post('/webhook', async (req, res) => {
     const update = req.body;
     const cfg    = await getConfig();
 
-    // ── Нажатие инлайн кнопки ────────────────────────────────────────────
-    if (update.callback_query) {
-      await handleCallbackQuery(update.callback_query, cfg);
-      return;
-    }
-
     // ── Личные сообщения / команды ────────────────────────────────────────
     if (update.message) {
       const msg    = update.message;
       const text   = (msg.text || '').trim();
-
-      // @ReplaceODbot — AI-команда
-      if (text.includes('@ReplaceODbot') || text.includes('@replaceodbot')) {
-        await handleAiMessage(msg, cfg);
-        return;
-      }
       const chatId = msg.chat.id;
       // Берём thread_id из входящего сообщения — отвечаем в тот же топик
       const replyThreadId = msg.message_thread_id || null;
-
-      // /end_day — итог дня вручную
-      if (text === '/end_day') {
-        console.log(`[channelBot] Команда /end_day от ${chatId} thread:${replyThreadId}`);
-        await sendTyping(cfg, chatId, replyThreadId);
-        await sendEndDaySummary(chatId, replyThreadId, cfg);
-        return;
-      }
 
       // /errors — Excel с ошибками регистрации
       if (text === '/errors') {
@@ -635,50 +336,6 @@ app.post('/webhook', async (req, res) => {
         }
         console.log(`[channelBot] Команда /status "${query}" от ${chatId} thread:${replyThreadId}`);
         await handleStatusCommand(chatId, replyThreadId, query, cfg);
-        return;
-      }
-
-      // /time_sup {поставщик}
-      if (text.startsWith('/time_sup')) {
-        const query = text.replace(/^\/time_sup\s*/i, '').trim();
-        if (!query) {
-          await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-            'Укажите поставщика: `/time_sup Скай ООО`', replyThreadId, 0);
-          return;
-        }
-        console.log(`[channelBot] Команда /time_sup "${query}" от ${chatId}`);
-        await handleStatusSupplierCommand(chatId, replyThreadId, query, cfg);
-        return;
-      }
-
-      // /time_all — ручной запуск отчёта по статусам (аналог крона checkStatus)
-      if (text === '/time_all') {
-        console.log(`[channelBot] Команда /time_all от ${chatId}`);
-        await sendTyping(cfg, chatId, replyThreadId);
-        const { updateOrderStatusAndNotify } = require('./checkStatus');
-        await updateOrderStatusAndNotify();
-        return;
-      }
-
-      // /delete <объект> <#номер>
-      if (text.startsWith('/delete_test')) {
-        console.log(`[channelBot] Команда /delete_test от ${chatId}`);
-        await processIikoErrors(cfg);
-        await sendMessage(cfg.TELEGRAM_TOKEN, chatId, 'Проверка ошибок IIKO выполнена.', replyThreadId, 0);
-        return;
-      }
-      if (text.startsWith('/delete ')) {
-        const parts = text.replace(/^\/delete\s+/, '').trim();
-        const m = parts.match(/^(.+?)\s+(#?\S+)$/);
-        if (!m) {
-          await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-            'Формат: `/delete Объект #НомерНакладной`', replyThreadId, 0);
-          return;
-        }
-        const objectQuery = m[1].trim();
-        const orderNum = m[2].replace(/^#/, '').trim();
-        console.log(`[channelBot] Команда /delete "${objectQuery}" #${orderNum}`);
-        await deleteOrderFromNotifications(chatId, replyThreadId, objectQuery, orderNum, cfg);
         return;
       }
     }
@@ -714,7 +371,7 @@ async function registerWebhook(token, webhookUrl) {
   // Разрешаем и channel_post и message (для команд)
   const body = JSON.stringify({
     url: webhookUrl,
-    allowed_updates: ['channel_post', 'message', 'callback_query'],
+    allowed_updates: ['channel_post', 'message'],
   });
 
   return new Promise((resolve, reject) => {
@@ -754,4 +411,4 @@ async function startChannelBot() {
   }
 }
 
-module.exports = { startChannelBot, parseChannelMessage, sendEndDaySummary, sendTodayOrders };
+module.exports = { startChannelBot, parseChannelMessage };
