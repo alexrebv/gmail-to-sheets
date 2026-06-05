@@ -401,31 +401,8 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
  */
 async function handleStatusAllCommand(chatId, threadId, cfg) {
   await sendTyping(cfg, chatId, threadId);
-
-  const pending = await getPendingOrders(cfg, null);
-
-  if (pending.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      '✅ Все накладные приняты.', threadId, 0);
-    return;
-  }
-
-  const bySupplier = groupBySupplier(pending);
-  let text = `*Не принятые накладные*\n`;
-
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    text += `\n*${escMd(supplier)}*\n`;
-    text += buildDatesText(bySupplier[supplier]);
-
-    if (text.length > 3500) {
-      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-      text = '';
-    }
-  }
-
-  if (text.trim()) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-  }
+  const { sendPendingReport } = require('./pendingReport');
+  await sendPendingReport(chatId, threadId, cfg);
 }
 
 /**

@@ -21,8 +21,8 @@
 
 const { getAuthClient, getSheetsClient } = require('./auth');
 const { getConfig } = require('./config');
-const { sendLongMessage } = require('./telegram');
 const { parseDateStr, todayDateKey } = require('./dateUtils');
+const { sendPendingReport } = require('./pendingReport');
 
 const COL = {
   SENT: {
@@ -40,16 +40,12 @@ async function updateOrderStatusAndNotify() {
   const SH_SENT          = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC           = cfg.SHEET_ACCEPTED || 'Принят';
   const SH_CRS           = cfg.SHEET_CROSSED  || 'Вычерк';
-  const TOKEN            = cfg.TELEGRAM_TOKEN;
   const CHAT_ID          = cfg.TELEGRAM_CHAT_ID;
   const THREAD_ID        = cfg.TELEGRAM_THREAD_ID || null;
-  const WAIT_MS          = Number(cfg.WAIT_MS || 5000);
-  const MAX_LEN          = Number(cfg.MAX_MESSAGE_LENGTH || 4000);
   const ARCHIVE_DAYS     = Number(cfg.ARCHIVE_DELAY_DAYS || 2);
-  const TZ               = cfg.TIMEZONE || 'Europe/Moscow';
 
-  if (!TOKEN || !CHAT_ID) {
-    console.error('[checkStatus] TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не заданы в Настройках');
+  if (!CHAT_ID) {
+    console.error('[checkStatus] TELEGRAM_CHAT_ID не задан в Настройках');
     return;
   }
 
@@ -97,8 +93,6 @@ async function updateOrderStatusAndNotify() {
   const accUpdates  = [];
   const crsUpdates  = [];
 
-  // Для Telegram: { "dateStr|supplier": { legal, objects: [{status, obj}] } }
-  const tgGroups = {};
 
   for (let i = 0; i < sentRows.length; i++) {
     const row       = sentRows[i];
@@ -163,17 +157,6 @@ async function updateOrderStatusAndNotify() {
       sentUpdates.push({ range: `'${SH_SENT}'!L${rowNum}`, values: [[`Архив ${archDate}`]] });
     }
 
-    // --- Статус для Telegram ---
-    let symbol = '';
-    if (foundAccepted && hasCrossed) symbol = '❓✅';
-    else if (foundAccepted)          symbol = '✅';
-    else if (foundError)             symbol = '❌';
-    else                             symbol = '⏳';
-
-    const dateStr = `${pdd}.${pmm}.${pyyyy.slice(-2)}`;
-    const tgKey   = `${dateStr}|${supplier}`;
-    if (!tgGroups[tgKey]) tgGroups[tgKey] = { legal, objects: [], dateMs: dateSent.getTime() };
-    tgGroups[tgKey].objects.push({ symbol, obj, isOld: daysDiff >= ARCHIVE_DAYS });
   }
 
   // --- Применяем все обновления в таблицах ---
@@ -190,34 +173,8 @@ async function updateOrderStatusAndNotify() {
   await applyUpdates(accUpdates,  SH_ACC);
   await applyUpdates(crsUpdates,  SH_CRS);
 
-  // --- Telegram ---
-  for (const key of Object.keys(tgGroups)) {
-    const [dateStr, supplier] = key.split('|');
-    const { legal, objects } = tgGroups[key];
-
-    let text = `*Заказ ${escMd(dateStr)}*\n*Поставщик:* ${escMd(supplier)}\n\n`;
-    if (legal) text += `⭐ ${escMd(legal)}\n`;
-
-    const counts = { '✅': 0, '❌': 0, '❓': 0 };
-    let newCount = 0;
-
-    objects.forEach(({ symbol, obj, isOld }) => {
-      text += `${symbol} ${escMd(obj)}\n`;
-      if (!isOld) {
-        newCount++;
-        if (symbol.includes('✅') && !symbol.includes('❓')) counts['✅']++;
-        if (symbol.includes('❌')) counts['❌']++;
-        if (symbol.includes('❓')) counts['❓']++;
-      }
-    });
-
-    if (newCount > 0) {
-      text += `\n*Всего заказов:* ${newCount}\n`;
-      text += `✅ — ${counts['✅']}\n❌ — ${counts['❌']}\n❓ — ${counts['❓']}\n`;
-    }
-
-    await sendLongMessage(TOKEN, CHAT_ID, text, THREAD_ID, MAX_LEN, WAIT_MS);
-  }
+  // --- Telegram: Excel-отчёт с непринятыми ---
+  await sendPendingReport(CHAT_ID, THREAD_ID, cfg);
 
   console.log('[checkStatus] Завершено.');
 }
