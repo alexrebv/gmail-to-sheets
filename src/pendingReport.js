@@ -48,7 +48,12 @@ async function fetchPendingRows(cfg) {
     if (num && type === 'Принят') acceptedNums.add(num);
   });
 
-  const todayKey = todayDateKey();
+  const todayKey     = todayDateKey();
+  const yesterdayKey = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  })();
   const pending  = [];
 
   for (const row of sentRows) {
@@ -72,12 +77,12 @@ async function fetchPendingRows(cfg) {
     if (sortKey >= todayKey) continue; // только прошлые дни
 
     pending.push({
-      supplier:  supplier || 'Без поставщика',
-      dateStr:   `${dd}.${mm}.${yyyy.slice(-2)}`,
+      supplier:    supplier || 'Без поставщика',
+      dateStr:     `${dd}.${mm}.${yyyy.slice(-2)}`,
       dateSortKey: sortKey,
-      object:    obj,
-      orderNum:  numRaw,
-      status:    'Не принято',
+      object:      obj,
+      orderNum:    numRaw,
+      status:      sortKey === yesterdayKey ? 'Ожидаем сегодня' : 'Не принято',
     });
   }
 
