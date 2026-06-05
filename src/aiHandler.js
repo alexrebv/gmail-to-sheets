@@ -67,10 +67,25 @@ async function parseIntent(text) {
 
 function findMatchingObjects(hint, objects) {
   if (!hint) return [];
-  const h = hint.toLowerCase().replace(/[-\s]/g, '');
-  return objects.filter(obj =>
-    obj.toLowerCase().replace(/[-\s]/g, '').includes(h)
-  );
+
+  const norm = s => s.toLowerCase().replace(/[-\s]/g, '');
+  const h    = norm(hint);
+
+  // Разбиваем хинт на буквенную и числовую части
+  // "Курс07" → letters="курс", digits="07"
+  // "Курский 07" → letters="курский", digits="07"
+  const letters = h.replace(/\d/g, '').trim();
+  const digits  = h.replace(/\D/g, '').trim();
+
+  return objects.filter(obj => {
+    const o = norm(obj);
+    // Сначала точное вхождение хинта
+    if (o.includes(h)) return true;
+    // Затем: буквы И цифры по отдельности
+    const lettersOk = !letters || o.includes(letters);
+    const digitsOk  = !digits  || o.includes(digits);
+    return lettersOk && digitsOk;
+  });
 }
 
 // ── Непринятые накладные по объекту ──────────────────────────────────────────
