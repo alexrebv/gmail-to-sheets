@@ -17,7 +17,7 @@ process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
 const cron = require('node-cron');
 const { processGmailOrders }         = require('./gmail');
 const { sendOrdersToTelegram }       = require('./sendOrders');
-const { updateOrderStatusAndNotify } = require('./checkStatus');
+const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus');
 const { startChannelBot, sendEndDaySummary, sendTodayOrders } = require('./channelBot');
 const { getConfig }                          = require('./config');
 
@@ -63,6 +63,7 @@ async function start() {
   // 4. Cron-задачи — timezone берётся из process.env.TZ, без опции { timezone }
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
   cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
+  cron.schedule('* * * * *',    () => run('Check status (update)',  updateOrderStatus));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
   cron.schedule(cronEndDay,     () => run('End day summary',        runEndDaySummary));
   cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));

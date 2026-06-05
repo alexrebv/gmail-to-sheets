@@ -33,26 +33,22 @@ const COL = {
   CRS:  { NUM: 2, STATUS: 8 },
 };
 
-async function updateOrderStatusAndNotify() {
+/**
+ * Только обновляет статусы в таблицах — без отправки в Telegram.
+ * Вызывается каждую минуту.
+ */
+async function updateOrderStatus() {
   const cfg = await getConfig();
 
   const SPREADSHEET_ID   = process.env.SPREADSHEET_ID;
   const SH_SENT          = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC           = cfg.SHEET_ACCEPTED || 'Принят';
   const SH_CRS           = cfg.SHEET_CROSSED  || 'Вычерк';
-  const CHAT_ID          = cfg.TELEGRAM_CHAT_ID;
-  const THREAD_ID        = cfg.TELEGRAM_THREAD_ID || null;
   const ARCHIVE_DAYS     = Number(cfg.ARCHIVE_DELAY_DAYS || 2);
-
-  if (!CHAT_ID) {
-    console.error('[checkStatus] TELEGRAM_CHAT_ID не задан в Настройках');
-    return;
-  }
 
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
 
-  // Читаем все три листа
   const [sentRes, accRes, crsRes] = await Promise.all([
     sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:L` }),
     sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_ACC}'!A2:I` }),
@@ -66,74 +62,60 @@ async function updateOrderStatusAndNotify() {
   const norm = s => (s || '').toString().replace(/\s/g, '').trim().replace(/^#/, '');
   const disp = s => (s || '').toString().trim();
 
-  const todayKey = todayDateKey(); // YYYYMMDD in local time
+  const todayKey = todayDateKey();
 
-  // Быстрый индекс по вычеркнутым
   const crossedSet = new Set();
-  const crossedRowIdx = {}; // num → index в crsRows
+  const crossedRowIdx = {};
   crsRows.forEach((r, i) => {
     const n = norm(r[COL.CRS.NUM]);
     if (n) { crossedSet.add(n); crossedRowIdx[n] = i; }
   });
 
-  // Быстрый индекс принятых только по номеру заказа
-  // Тип берём из колонки D (индекс 3): «Принят» или «Ошибка»
-  const acceptedMap = {}; // num → index
-  const errorMap    = {}; // num → index
+  const acceptedMap = {};
+  const errorMap    = {};
   accRows.forEach((r, i) => {
-    const n    = norm(r[COL.ACC.NUM]);           // C — Номер заказа
-    const type = (r[COL.ACC.TYPE] || '').toString().trim(); // D — Тип
+    const n    = norm(r[COL.ACC.NUM]);
+    const type = (r[COL.ACC.TYPE] || '').toString().trim();
     if (!n) return;
     if (type === 'Принят') acceptedMap[n] = i;
     if (type === 'Ошибка')  errorMap[n]   = i;
   });
 
-  // Накапливаем обновления для batchUpdate
   const sentUpdates = [];
   const accUpdates  = [];
   const crsUpdates  = [];
 
-
   for (let i = 0; i < sentRows.length; i++) {
-    const row       = sentRows[i];
-    const rowNum    = i + 2; // строка в таблице
+    const row    = sentRows[i];
+    const rowNum = i + 2;
 
-    const obj       = disp(row[COL.SENT.OBJ]);
-    const numRaw    = row[COL.SENT.NUM] || '';
-    const num       = norm(numRaw);
-    const supplier  = disp(row[COL.SENT.SUPPLIER]);
-    const dateRaw   = row[COL.SENT.DATE];
-    const legal     = disp(row[COL.SENT.LEGAL]);
-    const archFlag  = disp(row[COL.SENT.ARCHIVE]);
+    const obj      = disp(row[COL.SENT.OBJ]);
+    const numRaw   = row[COL.SENT.NUM] || '';
+    const num      = norm(numRaw);
+    const dateRaw  = row[COL.SENT.DATE];
+    const archFlag = disp(row[COL.SENT.ARCHIVE]);
+    const accStatus = disp(row[COL.SENT.ACC_STATUS]);
 
     if (!obj || !numRaw || !dateRaw) continue;
     if (archFlag.startsWith('Архив')) continue;
-
-    const accStatus = disp(row[COL.SENT.ACC_STATUS]);
-    if (accStatus.startsWith('❌')) continue; // удалено вручную / ошибка IIKO
+    if (accStatus.startsWith('❌')) continue;
 
     const dateParts = parseDateStr(dateRaw);
     if (!dateParts) continue;
     const { dd: pdd, mm: pmm, yyyy: pyyyy } = dateParts;
     const sortKey = `${pyyyy}${pmm}${pdd}`;
-    if (sortKey >= todayKey) continue; // только прошлые дни
+    if (sortKey >= todayKey) continue;
 
-    // daysDiff for archiving
     const dateSent = new Date(`${pyyyy}-${pmm}-${pdd}T00:00:00`);
     const today    = new Date(); today.setHours(0, 0, 0, 0);
     const daysDiff = Math.floor((today - dateSent) / 86400000);
 
-    // --- Вычерк ---
-    let hasCrossed = false;
     if (crossedSet.has(num)) {
-      hasCrossed = true;
       sentUpdates.push({ range: `'${SH_SENT}'!J${rowNum}`, values: [['Вычерк']] });
       const ci = crossedRowIdx[num];
       crsUpdates.push({ range: `'${SH_CRS}'!I${ci + 2}`, values: [['Вычеркнуто']] });
     }
 
-    // --- Принят ---
-    // Сравниваем только по номеру заказа
     const accIdx = acceptedMap[num];
     const errIdx = errorMap[num];
     const foundAccepted = accIdx !== undefined;
@@ -151,32 +133,46 @@ async function updateOrderStatusAndNotify() {
       }
     }
 
-    // --- Архивация ---
     if (foundAccepted && daysDiff >= ARCHIVE_DAYS) {
       const archDate = formatDate(today);
       sentUpdates.push({ range: `'${SH_SENT}'!L${rowNum}`, values: [[`Архив ${archDate}`]] });
     }
-
   }
 
-  // --- Применяем все обновления в таблицах ---
-  const applyUpdates = async (data, sheetLabel) => {
+  const applyUpdates = async (data, label) => {
     if (!data.length) return;
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
       requestBody: { valueInputOption: 'USER_ENTERED', data },
     });
-    console.log(`[checkStatus] Обновлено ${data.length} ячеек в "${sheetLabel}"`);
+    console.log(`[checkStatus] Обновлено ${data.length} ячеек в "${label}"`);
   };
 
   await applyUpdates(sentUpdates, SH_SENT);
   await applyUpdates(accUpdates,  SH_ACC);
   await applyUpdates(crsUpdates,  SH_CRS);
 
-  // --- Telegram: Excel-отчёт с непринятыми ---
-  await sendPendingReport(CHAT_ID, THREAD_ID, cfg);
+  console.log('[checkStatus] Статусы обновлены.');
+}
 
-  console.log('[checkStatus] Завершено.');
+/**
+ * Обновляет статусы И отправляет Excel-отчёт в Telegram.
+ * Вызывается по расписанию CRON_STATUS.
+ */
+async function updateOrderStatusAndNotify() {
+  await updateOrderStatus();
+
+  const cfg      = await getConfig();
+  const CHAT_ID  = cfg.TELEGRAM_CHAT_ID;
+  const THREAD_ID = cfg.TELEGRAM_THREAD_ID || null;
+
+  if (!CHAT_ID) {
+    console.error('[checkStatus] TELEGRAM_CHAT_ID не задан в Настройках');
+    return;
+  }
+
+  await sendPendingReport(CHAT_ID, THREAD_ID, cfg);
+  console.log('[checkStatus] Отчёт отправлен.');
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -192,4 +188,4 @@ function escMd(s) {
   return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
 
-module.exports = { updateOrderStatusAndNotify };
+module.exports = { updateOrderStatus, updateOrderStatusAndNotify };
