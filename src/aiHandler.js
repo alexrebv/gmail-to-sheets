@@ -40,9 +40,11 @@ async function getObjects(cfg) {
 // ── Claude Haiku — парсинг intent ─────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `Из сообщения пользователя извлеки поля. Отвечай ТОЛЬКО компактным JSON без пробелов и переносов.
-Формат: {"action":"delete"|"unknown","objectHint":string|null,"orderNum":string|null,"reason":string|null}
+Формат: {"action":"delete"|"unknown","objectHint":string|null,"supplierHint":string|null,"dateHint":string|null,"orderNum":string|null,"reason":string|null}
 action: "delete" если просят удалить/убрать/отменить накладную/заказ
 objectHint: название объекта/ресторана или null
+supplierHint: название поставщика или null
+dateHint: дата в формате DD.MM (только день и месяц, например "04.06") или null
 orderNum: номер накладной (формат #20260-xxx-xxxx или просто цифры с дефисами) или null
 reason: ПРИЧИНА в 2 слова на русском (примеры: "Не приехала", "Случайно отменили", "Уже принята", "Ошибка заказа", "Дубль накладной", "Не заказывали") или null`;
 
@@ -90,7 +92,7 @@ function findMatchingObjects(hint, objects) {
 
 // ── Непринятые накладные по объекту ──────────────────────────────────────────
 
-async function getPendingInvoicesForObject(objectName, cfg) {
+async function getPendingInvoicesForObject(objectName, cfg, supplierHint = null, dateHint = null) {
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
   const res    = await sheets.spreadsheets.values.get({
@@ -102,10 +104,18 @@ async function getPendingInvoicesForObject(objectName, cfg) {
   const todayKey = todayDateKey();
   const normStr  = s => (s || '').toString().replace(/[-\s]/g, '').toLowerCase().trim();
 
+  // dateHint: "04.06" → dd="04", mm="06"
+  let filterDd = null, filterMm = null;
+  if (dateHint) {
+    const dm = dateHint.match(/^(\d{1,2})\.(\d{1,2})$/);
+    if (dm) { filterDd = dm[1].padStart(2, '0'); filterMm = dm[2].padStart(2, '0'); }
+  }
+
   const invoices = [];
   for (const row of rows) {
     const obj       = (row[1] || '').toString().trim();
     const numRaw    = (row[2] || '').toString().trim();
+    const supplier  = (row[4] || '').toString().trim();
     const dateRaw   = (row[5] || '').toString().trim();
     const archive   = (row[11] || '').toString().trim();
     const accStatus = (row[10] || '').toString().trim();
@@ -115,12 +125,18 @@ async function getPendingInvoicesForObject(objectName, cfg) {
     if (accStatus.startsWith('❌') || accStatus.startsWith('✅')) continue;
     if (normStr(obj) !== normStr(objectName)) continue;
 
+    // Фильтр по поставщику
+    if (supplierHint && !normStr(supplier).includes(normStr(supplierHint))) continue;
+
     const parsed = parseDateStr(dateRaw);
     if (!parsed) continue;
     const { dd, mm, yyyy } = parsed;
     if (`${yyyy}${mm}${dd}` >= todayKey) continue;
 
-    invoices.push({ num: numRaw, dateStr: `${dd}.${mm}.${yyyy.slice(-2)}` });
+    // Фильтр по дате
+    if (filterDd && filterMm && (dd !== filterDd || mm !== filterMm)) continue;
+
+    invoices.push({ num: numRaw, dateStr: `${dd}.${mm}.${yyyy.slice(-2)}`, supplier });
   }
 
   return invoices;
@@ -237,8 +253,10 @@ async function handleAiMessage(msg, cfg) {
       return reply('Повторите запрос');
     }
 
-    const reason  = intent.reason || null;
-    const orderNum = intent.orderNum ? intent.orderNum.replace(/^#/, '') : null;
+    const reason       = intent.reason || null;
+    const orderNum     = intent.orderNum ? intent.orderNum.replace(/^#/, '') : null;
+    const supplierHint = intent.supplierHint || null;
+    const dateHint     = intent.dateHint || null;
 
     const matches = findMatchingObjects(intent.objectHint, objects);
 
@@ -251,11 +269,11 @@ async function handleAiMessage(msg, cfg) {
     }
 
     if (matches.length === 1) {
-      return proceedWithObject(matches[0], orderNum, reason, chatId, threadId, token, cfg);
+      return proceedWithObject(matches[0], orderNum, reason, chatId, threadId, token, cfg, supplierHint, dateHint);
     }
 
     // Несколько объектов — кнопки выбора
-    const id  = newPending({ step: 'select_object', objects: matches, orderNum, reason });
+    const id  = newPending({ step: 'select_object', objects: matches, orderNum, reason, supplierHint, dateHint });
     const kbd = matches.map((obj, idx) => [{ text: obj, callback_data: `po:${id}:${idx}` }]);
     await sendKeyboard(token, chatId, threadId, 'Уточните объект:', kbd);
 
@@ -265,7 +283,7 @@ async function handleAiMessage(msg, cfg) {
   }
 }
 
-async function proceedWithObject(objectName, orderNum, reason, chatId, threadId, token, cfg) {
+async function proceedWithObject(objectName, orderNum, reason, chatId, threadId, token, cfg, supplierHint = null, dateHint = null) {
   const { sendMessage } = require('./telegram');
   const reply = (t) => sendMessage(token, chatId, t, threadId, 0);
 
@@ -274,8 +292,8 @@ async function proceedWithObject(objectName, orderNum, reason, chatId, threadId,
     return reply(ok ? 'Принято' : 'Накладная не найдена');
   }
 
-  // Нет номера — ищем непринятые по объекту
-  const invoices = await getPendingInvoicesForObject(objectName, cfg);
+  // Нет номера — ищем непринятые по объекту (+ фильтры по поставщику и дате)
+  const invoices = await getPendingInvoicesForObject(objectName, cfg, supplierHint, dateHint);
 
   if (invoices.length === 0) return reply(`Нет непринятых накладных — ${objectName}`);
   if (invoices.length === 1) {
@@ -325,7 +343,7 @@ async function handleCallbackQuery(cbq, cfg) {
       const objectName = state.objects[idx];
       if (!objectName) return reply('Ошибка выбора');
       await editKeyboard(token, chatId, messageId, `Объект: ${objectName}`);
-      await proceedWithObject(objectName, state.orderNum, state.reason, chatId, threadId, token, cfg);
+      await proceedWithObject(objectName, state.orderNum, state.reason, chatId, threadId, token, cfg, state.supplierHint, state.dateHint);
 
     } else if (type === 'pi') {
       // Выбор накладной
