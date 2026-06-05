@@ -17,6 +17,7 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
+const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
 const { parseDateStr, todayDateKey } = require('./dateUtils');
 
 const app = express();
@@ -581,10 +582,22 @@ app.post('/webhook', async (req, res) => {
     const update = req.body;
     const cfg    = await getConfig();
 
+    // ── Нажатие инлайн кнопки ────────────────────────────────────────────
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query, cfg);
+      return;
+    }
+
     // ── Личные сообщения / команды ────────────────────────────────────────
     if (update.message) {
       const msg    = update.message;
       const text   = (msg.text || '').trim();
+
+      // @ReplaceODbot — AI-команда
+      if (text.includes('@ReplaceODbot') || text.includes('@replaceodbot')) {
+        await handleAiMessage(msg, cfg);
+        return;
+      }
       const chatId = msg.chat.id;
       // Берём thread_id из входящего сообщения — отвечаем в тот же топик
       const replyThreadId = msg.message_thread_id || null;
@@ -701,7 +714,7 @@ async function registerWebhook(token, webhookUrl) {
   // Разрешаем и channel_post и message (для команд)
   const body = JSON.stringify({
     url: webhookUrl,
-    allowed_updates: ['channel_post', 'message'],
+    allowed_updates: ['channel_post', 'message', 'callback_query'],
   });
 
   return new Promise((resolve, reject) => {

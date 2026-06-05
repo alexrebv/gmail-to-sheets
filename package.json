@@ -8,6 +8,7 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
