@@ -202,7 +202,7 @@ async function sendPendingReport(chatId, threadId, cfg) {
   });
 
   await sendDocument(token, chatId, threadId, filePath,
-    `Не принятые накладные — ${rows.length} шт.\nСформировано: ${now}`);
+    `Не принятые накладные - ${rows.length} шт.\nСформировано: ${now}`);
 
   try { fs.unlinkSync(filePath); } catch {}
 
