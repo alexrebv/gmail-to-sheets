@@ -408,6 +408,11 @@ async function sendEndOfDayReport(chatId, threadId, cfg) {
 async function sendTodayOrders(chatId, threadId, cfg) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+  const token          = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+
+  console.log(`[sendTodayOrders] chatId=${chatId} threadId=${threadId} token=${token ? 'OK' : 'MISSING'} sheet=${SH_SENT}`);
+
+  if (!token) { console.warn('[sendTodayOrders] TELEGRAM_TOKEN не задан'); return; }
 
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
@@ -421,28 +426,34 @@ async function sendTodayOrders(chatId, threadId, cfg) {
   const todayKey  = `${yyyy}${mm}${dd}`;
   const dateLabel = `${dd}.${mm}.${yyyy.slice(-2)}`;
 
+  console.log(`[sendTodayOrders] todayKey=${todayKey} rows=${rows.length}`);
+
   const bySupplier = {};
+  let skipped = 0;
   for (const row of rows) {
     const obj      = cleanObjectName((row[1] || '').toString().trim());
     const supplier = (row[4] || '').toString().trim();
     const dateRaw  = (row[5] || '').toString().trim();
     const archive  = (row[11] || '').toString().trim();
     const accStatus = (row[10] || '').toString().trim();
-    if (!obj || !supplier || !dateRaw) continue;
-    if (archive.startsWith('Архив')) continue;
-    if (accStatus.startsWith('❌')) continue;
+    if (!obj || !supplier || !dateRaw) { skipped++; continue; }
+    if (archive.startsWith('Архив')) { skipped++; continue; }
+    if (accStatus.startsWith('❌')) { skipped++; continue; }
 
     const parsed = parseDateStr(dateRaw);
-    if (!parsed) continue;
-    if (`${parsed.yyyy}${parsed.mm}${parsed.dd}` !== todayKey) continue;
+    if (!parsed) { console.log(`[sendTodayOrders] не распарсил дату: "${dateRaw}"`); skipped++; continue; }
+    const rowKey = `${parsed.yyyy}${parsed.mm}${parsed.dd}`;
+    if (rowKey !== todayKey) { skipped++; continue; }
 
     if (!bySupplier[supplier]) bySupplier[supplier] = [];
     bySupplier[supplier].push(obj);
   }
 
+  console.log(`[sendTodayOrders] пропущено=${skipped} поставщиков найдено=${Object.keys(bySupplier).length}`);
+
   const suppliers = Object.keys(bySupplier).sort();
   if (suppliers.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, `Сегодня (${dateLabel}) заказов нет.`, threadId, 0);
+    await sendMessage(token, chatId, `Сегодня (${dateLabel}) заказов нет.`, threadId, 0);
     return;
   }
 
@@ -451,7 +462,7 @@ async function sendTodayOrders(chatId, threadId, cfg) {
     text += `\n*${escMd(supplier)}*\n`;
     for (const obj of bySupplier[supplier]) text += `${escMd(obj)}\n`;
   }
-  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+  await sendMessage(token, chatId, text, threadId, 0);
 }
 
 // ── Webhook endpoint ──────────────────────────────────────────────────────────
