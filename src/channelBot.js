@@ -25,8 +25,8 @@ app.use(express.json());
 // ── Regex для парсинга сообщений канала ───────────────────────────────────────
 
 const RE_ACCEPTED = /Заказ\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+был\s+оприходован/i;
-const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
-const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+ошибкой/i;
+const RE_ERROR_A  = /заказа\s+(#\S+)\s+(.+?)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)/i;
+const RE_ERROR_B  = /заказа\s+(#\S+)\s+(.+?)\s+\(поставка\s+(\d{2}-\d{2}-\d{4})\)\s+в\s+ресторане\s+(.+?)\s+завершилась\s+[Оо]щ?шибкой/i;
 
 function cleanObjectName(name) {
   return (name || '').replace(/\s+(ФГ|ДР|DR|DP|GSW)\s*$/i, '').trim();
@@ -565,6 +565,19 @@ app.post('/webhook', async (req, res) => {
     }
 
     await writeToSheet(parsed, text, cfg);
+
+    // Уведомление об ошибке регистрации
+    if (parsed.type === 'Ошибка') {
+      const token    = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+      const chatId   = cfg.TELEGRAM_CHAT_ID   || process.env.TELEGRAM_CHAT_ID;
+      const threadId = cfg.TELEGRAM_THREAD_ID || process.env.TELEGRAM_THREAD_ID || null;
+      if (token && chatId) {
+        const errText = `❌ Ошибка регистрации\n${parsed.object}\n${parsed.supplier}\n${parsed.orderNumber}`;
+        await sendMessage(token, chatId, errText, threadId, 0).catch(e =>
+          console.error(`[channelBot] Ошибка отправки уведомления: ${e.message}`)
+        );
+      }
+    }
 
   } catch (err) {
     console.error(`[channelBot] Ошибка: ${err.message}`);
