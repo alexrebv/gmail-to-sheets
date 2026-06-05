@@ -199,6 +199,9 @@ async function sendPendingReport(chatId, threadId, cfg) {
     return;
   }
 
+  const waitingToday = rows.filter(r => r.status === 'Ожидаем сегодня').length;
+  const notAccepted  = rows.filter(r => r.status === 'Не принято').length;
+
   const filePath = await buildPendingExcel(rows);
   const now = new Date().toLocaleString('ru-RU', {
     timeZone: cfg.TIMEZONE || 'Europe/Moscow',
@@ -206,8 +209,13 @@ async function sendPendingReport(chatId, threadId, cfg) {
     hour: '2-digit', minute: '2-digit',
   });
 
-  await sendDocument(token, chatId, threadId, filePath,
-    `Не принятые накладные - ${rows.length} шт.\nСформировано: ${now}`);
+  const caption =
+    `Не принятые накладные - ${rows.length} шт.\n` +
+    `Ожидаем сегодня: ${waitingToday}\n` +
+    `Не принято: ${notAccepted}\n` +
+    `Сформировано: ${now}`;
+
+  await sendDocument(token, chatId, threadId, filePath, caption);
 
   try { fs.unlinkSync(filePath); } catch {}
 
