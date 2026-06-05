@@ -17,6 +17,7 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
+const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
 
 const app = express();
 app.use(express.json());
@@ -99,7 +100,7 @@ async function writeToSheet(parsed, rawText, cfg) {
  * Возвращает массив: [{ supplier, dateStr, dateSortKey, object, status }]
  * status: '⏳' — не оприходовано, '❌' — ошибка регистрации
  */
-async function getPendingOrders(cfg, objectFilter = null) {
+async function getPendingOrders(cfg, objectFilter = null, supplierFilter = null) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SH_SENT        = cfg.SHEET_SENT     || 'Отправлен';
   const SH_ACC         = cfg.SHEET_ACCEPTED || 'Принят';
@@ -140,43 +141,28 @@ async function getPendingOrders(cfg, objectFilter = null) {
     if (archive.startsWith('Архив')) continue;
     if (acceptedNums.has(num)) continue; // принято — не показываем
 
-    if (objectFilter && !norm(obj).includes(norm(objectFilter))) continue;
+    if (objectFilter   && !norm(obj).includes(norm(objectFilter))) continue;
+    if (supplierFilter && !norm(supplier).includes(norm(supplierFilter))) continue;
+
+    const accStatus = (row[10] || '').toString().trim();
+    if (accStatus.startsWith('❌')) continue;
 
     const status = errorNums.has(num) ? '❌' : '⏳';
 
-    // Нормализуем дату к DD.MM.YY для отображения и к YYYYMMDD для сортировки
-    let dateStr     = dateRaw;
-    let dateSortKey = dateRaw;
-    const dParsed   = new Date(dateRaw);
-    if (!isNaN(dParsed)) {
-      const dMidnight = new Date(dParsed);
-      dMidnight.setHours(0, 0, 0, 0);
-      const todayMidnight = new Date();
-      todayMidnight.setHours(0, 0, 0, 0);
-      if (dMidnight >= todayMidnight) continue; // сегодняшние — не показываем
+    const parsed = parseDateStr(dateRaw);
+    if (!parsed) continue;
 
-      const dd   = String(dParsed.getDate()).padStart(2, '0');
-      const mm   = String(dParsed.getMonth() + 1).padStart(2, '0');
-      const yy   = String(dParsed.getFullYear()).slice(-2);
-      const yyyy = dParsed.getFullYear();
-      dateStr     = `${dd}.${mm}.${yy}`;
-      dateSortKey = `${yyyy}${mm}${dd}`;
-    } else {
-      // уже в формате DD.MM.YYYY или DD.MM.YY
-      const parts4 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
-      const parts2 = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
-      if (parts4) {
-        const todayStr = (() => { const t = new Date(); t.setHours(0,0,0,0); return t; })();
-        const d = new Date(`${parts4[3]}-${parts4[2]}-${parts4[1]}`);
-        if (d >= todayStr) continue;
-        dateSortKey = `${parts4[3]}${parts4[2]}${parts4[1]}`;
-        dateStr = `${parts4[1]}.${parts4[2]}.${String(parts4[3]).slice(-2)}`;
-      } else if (parts2) {
-        dateSortKey = `20${parts2[3]}${parts2[2]}${parts2[1]}`;
-      }
-    }
+    const { dd, mm, yyyy } = parsed;
+    const { todayDateKey } = require('./dateUtils');
+    const sortKey = `${yyyy}${mm}${dd}`;
+    if (sortKey >= todayDateKey()) continue;
 
-    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status });
+    const yy = yyyy.slice(-2);
+    const dateStr     = `${dd}.${mm}.${yy}`;
+    const dateSortKey = sortKey;
+    const rawNum = (row[2] || '').toString().trim();
+
+    pending.push({ supplier: supplier || 'Без поставщика', dateStr, dateSortKey, object: obj, status, orderNum: rawNum });
   }
 
   return pending;
@@ -294,6 +280,180 @@ function escMd(s) {
   return (s || '').toString().replace(/[_*`[]/g, '\\$&');
 }
 
+const { parseDateStr } = require('./dateUtils');
+
+// ── Удаление накладной вручную ────────────────────────────────────────────────
+
+async function deleteOrderFromNotifications(chatId, threadId, query, cfg, isTest = false) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+  const norm = s => (s || '').toString().replace(/\s/g, '').toLowerCase().replace(/^#/, '').trim();
+
+  // Парсим: последний токен начинающийся с цифр или # — номер накладной, остальное — объект
+  const parts = query.split(/\s+/);
+  let orderNum   = '';
+  let objectQuery = '';
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (/^#?\d/.test(parts[i])) { orderNum = parts[i]; objectQuery = parts.slice(0, i).join(' '); break; }
+  }
+  if (!orderNum) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, 'Укажите номер накладной: `/delete Объект #номер`', threadId, 0);
+    return;
+  }
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:K` });
+  const rows   = res.data.values || [];
+
+  const targetNum = norm(orderNum);
+  const updates   = [];
+
+  rows.forEach((row, i) => {
+    const obj = cleanObjectName((row[1] || '').toString().trim());
+    const num = norm(row[2]);
+    if (num !== targetNum) return;
+    if (objectQuery && !norm(obj).includes(norm(objectQuery))) return;
+    if (!isTest) updates.push({ range: `'${SH_SENT}'!K${i + 2}`, values: [['❌ Удалено вручную']] });
+  });
+
+  if (updates.length === 0 && !isTest) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, `Накладная ${escMd(orderNum)} не найдена.`, threadId, 0);
+    return;
+  }
+
+  if (!isTest) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: 'USER_ENTERED', data: updates },
+    });
+  }
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
+    isTest ? `Тест: накладная ${escMd(orderNum)} была бы удалена.` : `Накладная ${escMd(orderNum)} убрана из оповещений.`,
+    threadId, 0);
+}
+
+// ── Вспомогательные функции для статуса ──────────────────────────────────────
+
+function groupBySupplier(pending) {
+  const map = {};
+  for (const item of pending) {
+    if (!map[item.supplier]) map[item.supplier] = {};
+    if (!map[item.supplier][item.dateSortKey]) map[item.supplier][item.dateSortKey] = { dateStr: item.dateStr, items: [] };
+    map[item.supplier][item.dateSortKey].items.push(item);
+  }
+  return map;
+}
+
+function buildDatesText(dateMap, showObject = true) {
+  let text = '';
+  for (const key of Object.keys(dateMap).sort()) {
+    const { dateStr, items } = dateMap[key];
+    text += `  ${dateStr}:\n`;
+    for (const item of items) {
+      const objPart = showObject ? ` ${escMd(item.object)}` : '';
+      text += `    ${item.status}${objPart} ${escMd(item.orderNum || '')}\n`;
+    }
+  }
+  return text;
+}
+
+// ── /time_sup ─────────────────────────────────────────────────────────────────
+
+async function handleStatusSupplierCommand(chatId, threadId, supplierQuery, cfg) {
+  await sendTyping(cfg, chatId, threadId);
+  const pending = await getPendingOrders(cfg, null, supplierQuery);
+
+  if (pending.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, `Все накладные приняты — ${escMd(supplierQuery)}`, threadId, 0);
+    return;
+  }
+
+  const bySupplier = groupBySupplier(pending);
+  let text = `*Не принятые накладные — ${escMd(supplierQuery)}*\n`;
+  for (const supplier of Object.keys(bySupplier).sort()) {
+    text += `\n*${escMd(supplier)}*\n`;
+    text += buildDatesText(bySupplier[supplier], true);
+  }
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+}
+
+// ── /end_day ──────────────────────────────────────────────────────────────────
+
+async function sendEndOfDayReport(chatId, threadId, cfg) {
+  const pending = await getPendingOrders(cfg, null);
+
+  const today = new Date();
+  const dd = String(today.getDate()).padStart(2, '0');
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const yy = String(today.getFullYear()).slice(-2);
+  const dateLabel = `${dd}.${mm}.${yy}`;
+
+  if (pending.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, `Итог дня ${escMd(dateLabel)}\nВсе накладные приняты.`, threadId, 0);
+    return;
+  }
+
+  const byObject = {};
+  for (const { object } of pending) byObject[object] = (byObject[object] || 0) + 1;
+
+  let text = `*Итог дня ${escMd(dateLabel)}*\nНе принято накладных: ${pending.length}\n\n`;
+  for (const obj of Object.keys(byObject).sort()) text += `${escMd(obj)} — ${byObject[obj]}\n`;
+
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+}
+
+// ── /time_all ─────────────────────────────────────────────────────────────────
+
+async function sendTodayOrders(chatId, threadId, cfg) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const SH_SENT        = cfg.SHEET_SENT || 'Отправлен';
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${SH_SENT}'!A2:L` });
+  const rows   = res.data.values || [];
+
+  const t = new Date();
+  const dd = String(t.getDate()).padStart(2, '0');
+  const mm = String(t.getMonth() + 1).padStart(2, '0');
+  const yyyy = String(t.getFullYear());
+  const todayKey  = `${yyyy}${mm}${dd}`;
+  const dateLabel = `${dd}.${mm}.${yyyy.slice(-2)}`;
+
+  const bySupplier = {};
+  for (const row of rows) {
+    const obj      = cleanObjectName((row[1] || '').toString().trim());
+    const supplier = (row[4] || '').toString().trim();
+    const dateRaw  = (row[5] || '').toString().trim();
+    const archive  = (row[11] || '').toString().trim();
+    const accStatus = (row[10] || '').toString().trim();
+    if (!obj || !supplier || !dateRaw) continue;
+    if (archive.startsWith('Архив')) continue;
+    if (accStatus.startsWith('❌')) continue;
+
+    const parsed = parseDateStr(dateRaw);
+    if (!parsed) continue;
+    if (`${parsed.yyyy}${parsed.mm}${parsed.dd}` !== todayKey) continue;
+
+    if (!bySupplier[supplier]) bySupplier[supplier] = [];
+    bySupplier[supplier].push(obj);
+  }
+
+  const suppliers = Object.keys(bySupplier).sort();
+  if (suppliers.length === 0) {
+    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, `Сегодня (${dateLabel}) заказов нет.`, threadId, 0);
+    return;
+  }
+
+  let text = `*Дата заказа ${escMd(dateLabel)}*\nЗаказ отправлен по поставщику:\n`;
+  for (const supplier of suppliers) {
+    text += `\n*${escMd(supplier)}*\n`;
+    for (const obj of bySupplier[supplier]) text += `${escMd(obj)}\n`;
+  }
+  await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
+}
+
 // ── Webhook endpoint ──────────────────────────────────────────────────────────
 
 app.post('/webhook', async (req, res) => {
@@ -303,13 +463,53 @@ app.post('/webhook', async (req, res) => {
     const update = req.body;
     const cfg    = await getConfig();
 
+    // ── Нажатие inline-кнопки (callback_query) ───────────────────────────
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query, cfg);
+      return;
+    }
+
     // ── Личные сообщения / команды ────────────────────────────────────────
     if (update.message) {
       const msg    = update.message;
       const text   = (msg.text || '').trim();
       const chatId = msg.chat.id;
-      // Берём thread_id из входящего сообщения — отвечаем в тот же топик
       const replyThreadId = msg.message_thread_id || null;
+
+      // @ReplaceODbot — AI удаление накладной
+      if (text.includes('@ReplaceODbot')) {
+        await handleAiMessage(msg, cfg);
+        return;
+      }
+
+      // /delete <объект> <номер>
+      if (text.startsWith('/delete_test')) {
+        await deleteOrderFromNotifications(chatId, replyThreadId, text.replace(/^\/delete_test\s*/i, '').trim(), cfg, true);
+        return;
+      }
+      if (text.startsWith('/delete')) {
+        await deleteOrderFromNotifications(chatId, replyThreadId, text.replace(/^\/delete\s*/i, '').trim(), cfg, false);
+        return;
+      }
+
+      // /time_sup <поставщик>
+      if (text.startsWith('/time_sup')) {
+        const query = text.replace(/^\/time_sup\s*/i, '').trim();
+        await handleStatusSupplierCommand(chatId, replyThreadId, query, cfg);
+        return;
+      }
+
+      // /time_all
+      if (text === '/time_all' || text.startsWith('/time_all ')) {
+        await sendTodayOrders(chatId, replyThreadId, cfg);
+        return;
+      }
+
+      // /end_day
+      if (text === '/end_day') {
+        await sendEndOfDayReport(chatId, replyThreadId, cfg);
+        return;
+      }
 
       // /errors — Excel с ошибками регистрации
       if (text === '/errors') {
@@ -371,7 +571,7 @@ async function registerWebhook(token, webhookUrl) {
   // Разрешаем и channel_post и message (для команд)
   const body = JSON.stringify({
     url: webhookUrl,
-    allowed_updates: ['channel_post', 'message'],
+    allowed_updates: ['channel_post', 'message', 'callback_query'],
   });
 
   return new Promise((resolve, reject) => {
