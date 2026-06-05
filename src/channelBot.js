@@ -611,4 +611,4 @@ async function startChannelBot() {
   }
 }
 
-module.exports = { startChannelBot, parseChannelMessage };
+module.exports = { startChannelBot, parseChannelMessage, sendTodayOrders, sendEndOfDayReport };

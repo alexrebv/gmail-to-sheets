@@ -10,15 +10,17 @@
 
 require('dotenv').config();
 const cron = require('node-cron');
-const { processGmailOrders }         = require('./gmail');
-const { sendOrdersToTelegram }       = require('./sendOrders');
-const { updateOrderStatusAndNotify } = require('./checkStatus');
-const { startChannelBot }            = require('./channelBot');
-const { getConfig }                  = require('./config');
+const { processGmailOrders }                          = require('./gmail');
+const { sendOrdersToTelegram }                        = require('./sendOrders');
+const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus');
+const { startChannelBot, sendTodayOrders }            = require('./channelBot');
+const { getConfig }                                   = require('./config');
 
 const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
+const DEFAULT_CRON_END_DAY     = '30 22 * * *';
+const DEFAULT_CRON_BUY         = '0 12,13,14,15,16 * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
@@ -37,18 +39,40 @@ async function start() {
   const cronGmail      = cfg.CRON_GMAIL       || DEFAULT_CRON_GMAIL;
   const cronSendOrders = cfg.CRON_SEND_ORDERS || DEFAULT_CRON_SEND_ORDERS;
   const cronStatus     = cfg.CRON_STATUS      || DEFAULT_CRON_STATUS;
+  const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
+  const cronBuy        = cfg.CRON_BUY         || DEFAULT_CRON_BUY;
 
   console.log(`  Gmail reader   : ${cronGmail}`);
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
+  console.log(`  End of day     : ${cronEndDay}`);
+  console.log(`  Today orders   : ${cronBuy}`);
 
   // 3. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
 
   // 4. Cron-задачи
+  cron.schedule('* * * * *',    () => run('Check status (update)', updateOrderStatus));
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
   cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
+  cron.schedule(cronEndDay,     () => run('End of day report',      () => runEndDay(cfg)));
+  cron.schedule(cronBuy,        () => run('Today orders → Telegram', () => runTodayOrders(cfg)));
+}
+
+async function runEndDay(cfg) {
+  const chatId   = cfg.TELEGRAM_CHAT_ID;
+  const threadId = cfg.TELEGRAM_THREAD_ID || null;
+  if (!chatId) return;
+  const { sendEndOfDayReport } = require('./channelBot');
+  await sendEndOfDayReport(chatId, threadId, cfg);
+}
+
+async function runTodayOrders(cfg) {
+  const chatId   = cfg.TELEGRAM_CHAT_ID;
+  const threadId = cfg.TELEGRAM_THREAD_ID || null;
+  if (!chatId) return;
+  await sendTodayOrders(chatId, threadId, cfg);
 }
 
 async function run(label, fn) {
