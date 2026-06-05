@@ -344,7 +344,8 @@ async function processGmailOrders() {
       if (token && chatId) {
         for (const r of minimalkaRows) {
           if (r.total < r.minAmount) {
-            const text = `${r.object} / ${r.supplier} / ${r.totalStr} / Минималка не набрана`;
+            const minStr = r.minAmount.toString().replace('.', ',');
+            const text = `${r.object}\n${r.supplier}\nСумма: ${r.totalStr}\n\nМинималка не набрана\nНужно ${minStr}`;
             await tgPostGmail(token, chatId, threadId, text).catch(e =>
               console.error(`[gmail] Telegram notify error: ${e.message}`)
             );
