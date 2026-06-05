@@ -1,4 +1,5 @@
-const { getGmailClient, getAuthClient } = require('./auth');
+const https = require('https');
+const { getGmailClient, getAuthClient, getSheetsClient } = require('./auth');
 const { appendRowsToSheet, ensureSheetExists } = require('./sheets');
 const { getConfig } = require('./config');
 
@@ -89,6 +90,127 @@ function extractSupplierFromHtml(html) {
   return '';
 }
 
+/**
+ * Извлекает итоговую сумму из HTML письма iiko.
+ * Ищет строку с текстом "Итог" (class style18 = синяя строка итогов),
+ * берёт 8-ю ячейку (индекс 7) — "Сумма вкл. НДС".
+ */
+function extractOrderTotal(html) {
+  if (!html) return null;
+
+  // Ищем строку <tr ...> содержащую "Итог" среди td с class style18
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    const rowHtml = rowMatch[1];
+    if (!/style18/i.test(rowHtml)) continue;
+
+    // Убираем теги и декодируем — проверяем что в строке есть "Итог"
+    const rowText = rowHtml.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+    if (!/итог/i.test(rowText)) continue;
+
+    // Извлекаем все ячейки
+    const cells = [];
+    const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+    let tdMatch;
+    while ((tdMatch = tdRegex.exec(rowHtml)) !== null) {
+      const cellText = tdMatch[1]
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&#160;/g, ' ')
+        .trim();
+      cells.push(cellText);
+    }
+
+    // 8-я ячейка (индекс 7) — "Сумма вкл. НДС"
+    if (cells.length >= 8) {
+      const raw = cells[7].replace(/\s/g, '').replace(',', '.');
+      const num = parseFloat(raw);
+      if (!isNaN(num)) return num;
+    }
+
+    // Если ячеек меньше, пробуем найти число в любой ячейке после "Итог"
+    for (let i = 1; i < cells.length; i++) {
+      const raw = cells[i].replace(/\s/g, '').replace(',', '.');
+      const num = parseFloat(raw);
+      if (!isNaN(num) && num > 0) return num;
+    }
+  }
+
+  return null;
+}
+
+// ── Кэш поставщиков ───────────────────────────────────────────────────────────
+
+let _suppliersCache    = null;
+let _suppliersCacheTime = 0;
+const SUPPLIERS_TTL    = 5 * 60 * 1000;
+
+async function getSupplierMinimums(cfg) {
+  if (_suppliersCache && Date.now() - _suppliersCacheTime < SUPPLIERS_TTL) return _suppliersCache;
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `'${cfg.SHEET_SUPPLIERS || 'Поставщики'}'!A2:B`,
+  });
+
+  const map = new Map();
+  for (const row of (res.data.values || [])) {
+    const name = (row[0] || '').toString().trim();
+    const minVal = parseFloat((row[1] || '').toString().replace(/\s/g, '').replace(',', '.'));
+    if (name && !isNaN(minVal)) map.set(name, minVal);
+  }
+
+  _suppliersCache    = map;
+  _suppliersCacheTime = Date.now();
+  return map;
+}
+
+function normSupplier(s) {
+  return (s || '').toString().toLowerCase()
+    .replace(/[«»"']/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function findSupplierMin(supplierName, minimumsMap) {
+  const norm = normSupplier(supplierName);
+  for (const [key, val] of minimumsMap) {
+    if (normSupplier(key) === norm) return val;
+  }
+  // Нечёткий поиск — вхождение
+  for (const [key, val] of minimumsMap) {
+    const k = normSupplier(key);
+    if (norm.includes(k) || k.includes(norm)) return val;
+  }
+  return null;
+}
+
+// ── Telegram уведомление ──────────────────────────────────────────────────────
+
+function tgPostGmail(token, chatId, threadId, text) {
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text,
+    ...(threadId ? { message_thread_id: parseInt(threadId) } : {}),
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path:     `/bot${token}/sendMessage`,
+      method:   'POST',
+      headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => resolve(JSON.parse(d)));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 /** Fallback: поиск поставщика в plain-text теле */
 function extractSupplierFromPlain(text) {
   if (!text) return '';
@@ -146,6 +268,9 @@ async function processGmailOrders() {
 
     const newRows = [];
     const processedIds = [];
+    const minimalkaRows = []; // строки для листа Минималка
+
+    const supplierMins = await getSupplierMinimums(cfg).catch(() => new Map());
 
     for (const id of messageIds) {
       const res = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
@@ -161,6 +286,7 @@ async function processGmailOrders() {
 
       const { object, orderNumber, orderDate } = parseSubject(subject);
       const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
+      const total    = extractOrderTotal(htmlBody);
 
       newRows.push([
         emailDate,         // A — Дата письма
@@ -174,8 +300,20 @@ async function processGmailOrders() {
         '',                // I — Тело (убрали HTML-мусор)
       ]);
 
+      // Проверка минималки
+      if (supplier && total !== null) {
+        const minAmount = findSupplierMin(supplier, supplierMins);
+        if (minAmount !== null) {
+          const totalStr = total.toString().replace('.', ',');
+          minimalkaRows.push({
+            emailDate, object: object || subject, orderNumber, orderDate,
+            supplier, total, totalStr, minAmount,
+          });
+        }
+      }
+
       processedIds.push(id);
-      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}`);
+      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}${total !== null ? ` | сумма: ${total}` : ''}`);
     }
 
     const HEADERS = [
@@ -184,6 +322,36 @@ async function processGmailOrders() {
     ];
     await ensureSheetExists(SHEET_NAME, HEADERS);
     await appendRowsToSheet(SHEET_NAME, newRows);
+
+    // ── Обработка Минималки ──────────────────────────────────────────────────
+    if (minimalkaRows.length > 0) {
+      const MSHEET  = cfg.SHEET_MINIMALKA || 'Минималка';
+      const MHEADERS = ['Дата письма', 'Объект', 'Номер заказа', 'Дата заказа', 'Поставщик', 'Дата отправки', 'Сумма итог', 'Статус'];
+      await ensureSheetExists(MSHEET, MHEADERS);
+
+      const mRows = minimalkaRows.map(r => [
+        r.emailDate, r.object, r.orderNumber, r.orderDate,
+        r.supplier, r.emailDate, r.totalStr, 'обработан',
+      ]);
+      await appendRowsToSheet(MSHEET, mRows);
+
+      // Уведомления по накладным ниже минималки
+      const token    = cfg.TELEGRAM_TOKEN;
+      const chatId   = cfg.TELEGRAM_CHAT_ID;
+      const threadId = cfg.TELEGRAM_THREAD_ID || null;
+
+      if (token && chatId) {
+        for (const r of minimalkaRows) {
+          if (r.total < r.minAmount) {
+            const text = `${r.object} / ${r.supplier} / ${r.totalStr} / Минималка не набрана`;
+            await tgPostGmail(token, chatId, threadId, text).catch(e =>
+              console.error(`[gmail] Telegram notify error: ${e.message}`)
+            );
+            console.log(`[gmail] Минималка не набрана: ${r.object} | ${r.supplier} | ${r.total} < ${r.minAmount}`);
+          }
+        }
+      }
+    }
     console.log(`Записано строк: ${newRows.length}`);
 
     for (const id of processedIds) {
