@@ -56,22 +56,24 @@ async function start() {
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
   cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
-  cron.schedule(cronEndDay,     () => run('End of day report',      () => runEndDay(cfg)));
-  cron.schedule(cronBuy,        () => run('Today orders → Telegram', () => runTodayOrders(cfg)));
+  cron.schedule(cronEndDay,     () => run('End of day report',       runEndDay));
+  cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));
 }
 
-async function runEndDay(cfg) {
-  const chatId   = cfg.TELEGRAM_CHAT_ID;
-  const threadId = cfg.TELEGRAM_THREAD_ID || null;
-  if (!chatId) return;
+async function runEndDay() {
+  const cfg      = await getConfig();
+  const chatId   = cfg.TELEGRAM_CHAT_ID   || process.env.TELEGRAM_CHAT_ID;
+  const threadId = cfg.TELEGRAM_THREAD_ID || process.env.TELEGRAM_THREAD_ID || null;
+  if (!chatId) { console.warn('[runEndDay] TELEGRAM_CHAT_ID не задан'); return; }
   const { sendEndOfDayReport } = require('./channelBot');
   await sendEndOfDayReport(chatId, threadId, cfg);
 }
 
-async function runTodayOrders(cfg) {
-  const chatId   = cfg.TELEGRAM_CHAT_ID;
-  const threadId = cfg.TELEGRAM_THREAD_ID || null;
-  if (!chatId) return;
+async function runTodayOrders() {
+  const cfg      = await getConfig();
+  const chatId   = cfg.TELEGRAM_CHAT_ID   || process.env.TELEGRAM_CHAT_ID;
+  const threadId = cfg.TELEGRAM_THREAD_ID || process.env.TELEGRAM_THREAD_ID || null;
+  if (!chatId) { console.warn('[runTodayOrders] TELEGRAM_CHAT_ID не задан'); return; }
   await sendTodayOrders(chatId, threadId, cfg);
 }
 
