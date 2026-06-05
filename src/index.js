@@ -9,6 +9,7 @@
  */
 
 require('dotenv').config();
+process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
 const cron = require('node-cron');
 const { processGmailOrders }                          = require('./gmail');
 const { sendOrdersToTelegram }                        = require('./sendOrders');
