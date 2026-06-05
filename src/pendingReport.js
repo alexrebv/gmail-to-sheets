@@ -108,51 +108,18 @@ async function buildPendingExcel(rows) {
 
   // Заголовок
   ws.getRow(1).eachCell(cell => {
-    cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Arial', size: 10 };
-    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2C3E50' } };
+    cell.font      = { bold: true, name: 'Arial', size: 10 };
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
   });
-  ws.getRow(1).height = 22;
+  ws.getRow(1).height = 18;
 
   // Строки
-  let prevSupplier = null;
-  let rowIdx = 2;
-
   for (const r of rows) {
-    // Разделитель поставщика
-    if (r.supplier !== prevSupplier) {
-      const sepRow = ws.getRow(rowIdx);
-      sepRow.getCell(1).value = r.supplier;
-      sepRow.getCell(1).font  = { bold: true, name: 'Arial', size: 10, color: { argb: 'FF1A252F' } };
-      sepRow.getCell(1).fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD5E8F7' } };
-      ws.mergeCells(`A${rowIdx}:E${rowIdx}`);
-      sepRow.height = 18;
-      prevSupplier = r.supplier;
-      rowIdx++;
-    }
-
-    const dataRow = ws.getRow(rowIdx);
-    dataRow.getCell(1).value = r.supplier;
-    dataRow.getCell(2).value = r.dateStr;
-    dataRow.getCell(3).value = r.object;
-    dataRow.getCell(4).value = r.orderNum;
-    dataRow.getCell(5).value = r.status;
-
-    dataRow.eachCell(cell => {
-      cell.font      = { name: 'Arial', size: 9 };
-      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F4F8' } };
-      cell.alignment = { vertical: 'middle' };
-      cell.border    = { bottom: { style: 'thin', color: { argb: 'FFDDDDDD' } } };
-    });
-    dataRow.getCell(5).font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFC0392B' } };
-    dataRow.height = 17;
-    rowIdx++;
+    ws.addRow([r.supplier, r.dateStr, r.object, r.orderNum, r.status]);
   }
 
   // Итог
-  const totRow = ws.getRow(rowIdx);
-  totRow.getCell(1).value = `Итого не принято: ${rows.length}`;
-  totRow.getCell(1).font  = { bold: true, name: 'Arial', size: 10 };
+  ws.addRow([`Итого не принято: ${rows.length}`]);
 
   const now    = new Date().toISOString().slice(0, 10);
   const tmpPath = path.join(os.tmpdir(), `pending_${now}.xlsx`);
