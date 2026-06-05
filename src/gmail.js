@@ -91,47 +91,48 @@ function extractSupplierFromHtml(html) {
 }
 
 /**
- * Извлекает итоговую сумму из HTML письма iiko.
- * Ищет строку с текстом "Итог" (class style18 = синяя строка итогов),
- * берёт 8-ю ячейку (индекс 7) — "Сумма вкл. НДС".
+ * Извлекает итоговую сумму "Сумма вкл. НДС" из HTML письма iiko.
+ *
+ * Структура строки итогов в письме (column-индексы с нуля):
+ *   column0..column5 — пустые ячейки
+ *   column6 style4   — текст "Итог"
+ *   column7 style18  — Сумма вкл. НДС  ← нужна эта
+ *   column8 style18  — НДС
+ *   column9 style18  — Сумма без НДС
+ *
+ * Стратегия: ищем <tr>, в котором есть ячейка с текстом "Итог" И ячейка
+ * class="column7 style18". Берём значение из column7 style18.
  */
 function extractOrderTotal(html) {
   if (!html) return null;
 
-  // Ищем строку <tr ...> содержащую "Итог" среди td с class style18
+  // Ищем строку <tr> содержащую "Итог"
   const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let rowMatch;
   while ((rowMatch = rowRegex.exec(html)) !== null) {
     const rowHtml = rowMatch[1];
-    if (!/style18/i.test(rowHtml)) continue;
 
-    // Убираем теги и декодируем — проверяем что в строке есть "Итог"
+    // В строке должна быть ячейка с текстом "Итог"
     const rowText = rowHtml.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
     if (!/итог/i.test(rowText)) continue;
 
-    // Извлекаем все ячейки
-    const cells = [];
+    // Ищем ячейку column7 style18 — это и есть "Сумма вкл. НДС"
+    const col7Match = rowHtml.match(/<td[^>]*class="[^"]*column7[^"]*style18[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
+    if (col7Match) {
+      const raw = col7Match[1].replace(/<[^>]+>/g, '').replace(/\s/g, '').replace(',', '.');
+      const num = parseFloat(raw);
+      if (!isNaN(num) && num > 0) return num;
+    }
+
+    // Fallback: берём первое положительное число в строке после ячейки "Итог"
     const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
     let tdMatch;
+    let pastItog = false;
     while ((tdMatch = tdRegex.exec(rowHtml)) !== null) {
-      const cellText = tdMatch[1]
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&#160;/g, ' ')
-        .trim();
-      cells.push(cellText);
-    }
-
-    // 8-я ячейка (индекс 7) — "Сумма вкл. НДС"
-    if (cells.length >= 8) {
-      const raw = cells[7].replace(/\s/g, '').replace(',', '.');
-      const num = parseFloat(raw);
-      if (!isNaN(num)) return num;
-    }
-
-    // Если ячеек меньше, пробуем найти число в любой ячейке после "Итог"
-    for (let i = 1; i < cells.length; i++) {
-      const raw = cells[i].replace(/\s/g, '').replace(',', '.');
+      const cellText = tdMatch[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+      if (/^итог$/i.test(cellText)) { pastItog = true; continue; }
+      if (!pastItog) continue;
+      const raw = cellText.replace(/\s/g, '').replace(',', '.');
       const num = parseFloat(raw);
       if (!isNaN(num) && num > 0) return num;
     }
