@@ -50,6 +50,24 @@ function parseChannelMessage(text) {
 
 // ── Запись в лист «Принят» ────────────────────────────────────────────────────
 
+/** Retry с экспоненциальным backoff для вызовов Google API */
+async function withRetry(fn, label, maxAttempts = 4) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const retryable = err.code === 429 || err.code === 503 || (err.status >= 500 && err.status < 600);
+      if (attempt < maxAttempts && retryable) {
+        const delay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+        console.warn(`[${label}] Попытка ${attempt} не удалась (${err.code || err.status}), повтор через ${delay}мс`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 async function writeToSheet(parsed, rawText, cfg) {
   const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
   const SHEET_NAME     = cfg.SHEET_ACCEPTED || 'Принят';
@@ -62,10 +80,10 @@ async function writeToSheet(parsed, rawText, cfg) {
   const auth   = await getAuthClient();
   const sheets = getSheetsClient(auth);
 
-  const colC = await sheets.spreadsheets.values.get({
+  const colC = await withRetry(() => sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!C:C`,
-  });
+  }), 'writeToSheet.get');
   const colValues = colC.data.values || [];
   let lastRow = 1;
   for (let i = colValues.length - 1; i >= 0; i--) {
@@ -78,7 +96,7 @@ async function writeToSheet(parsed, rawText, cfg) {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 
-  await sheets.spreadsheets.values.update({
+  await withRetry(() => sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
     range: `'${SHEET_NAME}'!A${lastRow + 1}`,
     valueInputOption: 'USER_ENTERED',
@@ -86,7 +104,7 @@ async function writeToSheet(parsed, rawText, cfg) {
       now, parsed.supplier, parsed.orderNumber, parsed.type,
       parsed.deliveryDate, parsed.object, rawText.substring(0, 500), '', '',
     ]] },
-  });
+  }), 'writeToSheet.write');
 
   console.log(`[channelBot] ✓ ${parsed.type} | ${parsed.orderNumber} | ${parsed.object} | ${parsed.supplier}`);
 
