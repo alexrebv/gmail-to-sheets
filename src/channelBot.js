@@ -17,6 +17,7 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
+const { sendPendingReport } = require('./pendingReport');
 const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
 
 const app = express();
@@ -224,37 +225,7 @@ async function handleStatusCommand(chatId, threadId, objectQuery, cfg) {
  */
 async function handleStatusAllCommand(chatId, threadId, cfg) {
   await sendTyping(cfg, chatId, threadId);
-
-  const pending = await getPendingOrders(cfg, null);
-
-  if (pending.length === 0) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId,
-      '✅ Все накладные приняты.', threadId, 0);
-    return;
-  }
-
-  // Если текст большой — разбиваем по поставщикам
-  const bySupplier = {};
-  for (const item of pending) {
-    if (!bySupplier[item.supplier]) bySupplier[item.supplier] = [];
-    bySupplier[item.supplier].push(item);
-  }
-
-  let text = `*Не принятые накладные*\n`;
-
-  for (const supplier of Object.keys(bySupplier).sort()) {
-    const chunk = buildPendingText(bySupplier[supplier], supplier).replace(/^\*[^\n]+\n/, '');
-    text += `\n*${escMd(supplier)}*\n${chunk}`;
-
-    if (text.length > 3500) {
-      await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-      text = '';
-    }
-  }
-
-  if (text.trim()) {
-    await sendMessage(cfg.TELEGRAM_TOKEN, chatId, text, threadId, 0);
-  }
+  await sendPendingReport(chatId, threadId, cfg);
 }
 
 // Отправляет "печатает..." в чат
