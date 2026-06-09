@@ -55,7 +55,6 @@ async function start() {
   // 4. Cron-задачи
   cron.schedule('* * * * *',    () => run('Check status (update)', updateOrderStatus));
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
-  cron.schedule(cronSendOrders, () => run('Send orders → Telegram', sendOrdersToTelegram));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
   cron.schedule(cronEndDay,     () => run('End of day report',       runEndDay));
   cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));
