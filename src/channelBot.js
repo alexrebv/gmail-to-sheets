@@ -19,6 +19,7 @@ const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
 const { sendPendingReport } = require('./pendingReport');
 const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
+const { handleStart, handleMenuText, handleMenuCallback } = require('./menuBot');
 
 const app = express();
 app.use(express.json());
@@ -447,7 +448,9 @@ app.post('/webhook', async (req, res) => {
 
     // ── Нажатие inline-кнопки (callback_query) ───────────────────────────
     if (update.callback_query) {
-      await handleCallbackQuery(update.callback_query, cfg);
+      const token = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+      const handled = await handleMenuCallback(update.callback_query, token);
+      if (!handled) await handleCallbackQuery(update.callback_query, cfg);
       return;
     }
 
@@ -457,6 +460,17 @@ app.post('/webhook', async (req, res) => {
       const text   = (msg.text || '').trim();
       const chatId = msg.chat.id;
       const replyThreadId = msg.message_thread_id || null;
+      const token  = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+
+      // /start — меню с авторизацией
+      if (text === '/start') {
+        await handleStart(msg, token);
+        return;
+      }
+
+      // Обработка логина/пароля
+      const menuHandled = await handleMenuText(msg, token);
+      if (menuHandled) return;
 
       // @ReplaceODbot — AI удаление накладной
       if (text.includes('@ReplaceODbot')) {
