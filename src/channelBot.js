@@ -431,10 +431,14 @@ async function sendTodayOrders(chatId, threadId, cfg) {
 
   let text = `*Дата заказа ${escMd(dateLabel)}*\nЗаказ отправлен по поставщику:\n`;
   for (const supplier of suppliers) {
-    text += `\n*${escMd(supplier)}*\n`;
-    for (const obj of bySupplier[supplier]) text += `${escMd(obj)}\n`;
+    const chunk = `\n*${escMd(supplier)}*\n` + bySupplier[supplier].map(o => `${escMd(o)}\n`).join('');
+    if (text.length + chunk.length > 3800) {
+      await sendMessage(token, chatId, text, threadId, 0);
+      text = '';
+    }
+    text += chunk;
   }
-  await sendMessage(token, chatId, text, threadId, 0);
+  if (text.trim()) await sendMessage(token, chatId, text, threadId, 0);
 }
 
 // ── Webhook endpoint ──────────────────────────────────────────────────────────
