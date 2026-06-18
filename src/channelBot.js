@@ -468,10 +468,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // Обработка логина/пароля
-      const menuHandled = await handleMenuText(msg, token);
-      if (menuHandled) return;
-
       // @ReplaceODbot — AI удаление накладной
       if (text.includes('@ReplaceODbot')) {
         await handleAiMessage(msg, cfg);
@@ -497,6 +493,7 @@ app.post('/webhook', async (req, res) => {
 
       // /time_all
       if (text === '/time_all' || text.startsWith('/time_all ')) {
+        console.log(`[channelBot] Команда /time_all от ${chatId} thread:${replyThreadId}`);
         await sendTodayOrders(chatId, replyThreadId, cfg);
         return;
       }
@@ -534,6 +531,10 @@ app.post('/webhook', async (req, res) => {
         await handleStatusCommand(chatId, replyThreadId, query, cfg);
         return;
       }
+
+      // Обработка логина/пароля для /start меню (только если не команда)
+      const menuHandled = await handleMenuText(msg, token);
+      if (menuHandled) return;
     }
 
     // ── Сообщения из канала ───────────────────────────────────────────────
