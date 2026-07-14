@@ -226,9 +226,9 @@ async function showStatsScreen(token, chatId, messageId, id, state) {
     return `${obj} — ${count} шт.`;
   }).sort();
 
-  const adminTag = user.role === 'admin' ? ' 👑 Admin' : '';
+  const adminTag = user.role === 'admin' ? ' [Admin]' : '';
   const text = `<b>${user.firstName} ${user.lastName}${adminTag}</b>\n\nНепринятые накладные:\n\n${lines.join('\n')}`;
-  const kbd  = [[{ text: '📋 Перейти к объектам', callback_data: `mu:objs:${id}:0` }]];
+  const kbd  = [[{ text: 'Перейти к объектам', callback_data: `mu:objs:${id}:0` }]];
 
   if (messageId) return editMsg(token, chatId, messageId, text, kbd);
   return sendMsg(token, chatId, text, kbd);
@@ -262,7 +262,7 @@ async function showInvoicesScreen(token, chatId, messageId, id, state, objIdx) {
   const invList = state.invoices.filter(inv => inv.obj === obj);
 
   if (invList.length === 0) {
-    return editMsg(token, chatId, messageId, `✅ <b>${obj}</b>\nВсе накладные приняты.`, [
+    return editMsg(token, chatId, messageId, `<b>${obj}</b>\nВсе накладные приняты.`, [
       [{ text: '← Назад', callback_data: `mu:objs:${id}:0` }],
     ]);
   }
@@ -283,14 +283,14 @@ async function showActionScreen(token, chatId, messageId, id, state, objIdx, inv
   if (!inv) return editMsg(token, chatId, messageId, 'Накладная не найдена', []);
 
   const kbd = [
-    [{ text: '✅ Принять',     callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:accept`     }],
-    [{ text: '❌ Удалить',     callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:delete`     }],
-    [{ text: '🚫 Не приехала', callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:notarrived` }],
+    [{ text: 'Принять',     callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:accept`     }],
+    [{ text: 'Удалить',     callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:delete`     }],
+    [{ text: 'Не приехала', callback_data: `mu:ac:${id}:${objIdx}:${invIdx}:notarrived` }],
     [{ text: '← Назад',       callback_data: `mu:bk:${id}:inv:${objIdx}`                   }],
   ];
 
   return editMsg(token, chatId, messageId,
-    `<b>Накладная</b>\n🏠 ${obj}\n📅 ${inv.dateStr}\n🏭 ${inv.supplier}\n#️⃣ ${inv.num}`, kbd);
+    `<b>Накладная</b>\n${obj}\n${inv.dateStr}\n${inv.supplier}\n${inv.num}`, kbd);
 }
 
 // ── Вход после авторизации ────────────────────────────────────────────────────
@@ -305,7 +305,7 @@ async function enterMenu(token, chatId, messageId, user, cfg) {
     : dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object).sort();
 
   if (objects.length === 0) {
-    const text = `✅ ${user.firstName}, вы авторизованы.\nОбъекты не найдены в листе Распределение.`;
+    const text = `${user.firstName}, вы авторизованы.\nОбъекты не найдены в листе Распределение.`;
     if (messageId) return editMsg(token, chatId, messageId, text, []);
     return sendMsg(token, chatId, text, null);
   }
@@ -351,7 +351,7 @@ async function handleMenuText(msg, token) {
       return true;
     }
 
-    const sent = await sendMsg(token, chatId, '⏳ Загружаю данные...');
+    const sent = await sendMsg(token, chatId, 'Загружаю данные...');
     await enterMenu(token, chatId, sent?.result?.message_id, user, cfg);
     return true;
   }
