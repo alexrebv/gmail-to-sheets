@@ -17,7 +17,7 @@ const { getConfig } = require('./config');
 const { ensureSheetExists } = require('./sheets');
 const { sendMessage } = require('./telegram');
 const { sendErrorsReport } = require('./errorsReport');
-const { sendPendingReport } = require('./pendingReport');
+const { sendPendingReport, sendTuReport, sendAllTuReports } = require('./pendingReport');
 const { handleAiMessage, handleCallbackQuery } = require('./aiHandler');
 const { handleStart, handleMenuText, handleMenuCallback } = require('./menuBot');
 
@@ -513,6 +513,24 @@ app.post('/webhook', async (req, res) => {
         console.log(`[channelBot] Команда /errors от ${chatId} thread:${replyThreadId}`);
         await sendTyping(cfg, chatId, replyThreadId);
         await sendErrorsReport(chatId, replyThreadId, cfg);
+        return;
+      }
+
+      // /tuall — отчёты по всем ТУ
+      if (text === '/tuall') {
+        console.log(`[channelBot] Команда /tuall от ${chatId}`);
+        await sendTyping(cfg, chatId, replyThreadId);
+        await sendAllTuReports(cfg, chatId, replyThreadId);
+        return;
+      }
+
+      // /tu_{login}_all — отчёт по конкретному ТУ
+      const tuMatch = text.match(/^\/tu_(.+?)_all$/i);
+      if (tuMatch) {
+        const login = tuMatch[1];
+        console.log(`[channelBot] Команда /tu_${login}_all от ${chatId}`);
+        await sendTyping(cfg, chatId, replyThreadId);
+        await sendTuReport(login, cfg, chatId, replyThreadId);
         return;
       }
 

@@ -222,4 +222,156 @@ async function sendPendingReport(chatId, threadId, cfg) {
   console.log(`[pendingReport] Отправлен файл: ${rows.length} строк → чат ${chatId}`);
 }
 
-module.exports = { sendPendingReport };
+// ── Отчёты по ТУ ──────────────────────────────────────────────────────────────
+
+async function fetchLoginsList(cfg) {
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `'${cfg.SHEET_LOGINS || 'Logins'}'!A2:F`,
+  });
+  return (res.data.values || []).map(r => ({
+    firstName: (r[0] || '').trim(),
+    lastName:  (r[1] || '').trim(),
+    login:     (r[2] || '').trim().toLowerCase(),
+    password:  (r[3] || '').trim(),
+    tag:       (r[4] || '').trim().replace(/^@/, '').toLowerCase(),
+    role:      (r[5] || '').trim().toLowerCase(),
+  })).filter(u => u.login);
+}
+
+async function fetchDistribution(cfg) {
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:B`,
+  });
+  return (res.data.values || []).map(r => ({
+    object:  (r[0] || '').trim(),
+    manager: (r[1] || '').trim(),
+  })).filter(d => d.object && d.manager);
+}
+
+async function buildTuExcel(rows, tuName) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Непринятые накладные');
+
+  ws.columns = [
+    { header: 'Объект',           key: 'object',   width: 30 },
+    { header: 'Поставщик',        key: 'supplier', width: 32 },
+    { header: 'Дата заказа',      key: 'dateStr',  width: 14 },
+    { header: 'Номер накладной',  key: 'orderNum', width: 22 },
+    { header: 'Статус',           key: 'status',   width: 18 },
+  ];
+
+  ws.getRow(1).eachCell(cell => {
+    cell.font      = { bold: true, name: 'Arial', size: 10 };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+  ws.getRow(1).height = 18;
+
+  for (const r of rows) {
+    ws.addRow([r.object, r.supplier, r.dateStr, r.orderNum, r.status]);
+  }
+
+  ws.addRow([`Итого: ${rows.length}`]);
+
+  const now     = new Date().toISOString().slice(0, 10);
+  const tmpPath = path.join(os.tmpdir(), `${tuName}_pending_${now}.xlsx`);
+  await wb.xlsx.writeFile(tmpPath);
+  return tmpPath;
+}
+
+/**
+ * Отправляет отчёт по одному ТУ.
+ * @param {string} login — логин ТУ из Logins
+ * @param {object} cfg
+ * @param {string} chatId
+ * @param {string|null} threadId
+ */
+async function sendTuReport(login, cfg, chatId, threadId) {
+  const token = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+  if (!token) return;
+
+  const [users, dist, allPending] = await Promise.all([
+    fetchLoginsList(cfg),
+    fetchDistribution(cfg),
+    fetchPendingRows(cfg),
+  ]);
+
+  const user = users.find(u => u.login === login.toLowerCase());
+  if (!user) {
+    const { sendMessage } = require('./telegram');
+    await sendMessage(token, chatId, `ТУ с логином «${login}» не найден.`, threadId, 0);
+    return;
+  }
+
+  const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
+  const userObjs = new Set(dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object));
+
+  const rows = allPending.filter(r => userObjs.has(r.object));
+
+  if (rows.length === 0) {
+    const { sendMessage } = require('./telegram');
+    const tagStr = user.tag ? `@${user.tag} ` : '';
+    await sendMessage(token, chatId, `${tagStr}${user.firstName} ${user.lastName} — ✅ все накладные приняты.`, threadId, 0);
+    return;
+  }
+
+  const now      = new Date().toISOString().slice(0, 10);
+  const fileName = `${user.login}_pending_${now}`;
+  const filePath = await buildTuExcel(rows, fileName);
+
+  const tagStr = user.tag ? `@${user.tag} ` : '';
+  const caption = `${tagStr}${user.firstName} ${user.lastName}\nНепринятые накладные: ${rows.length} шт.\nСформировано: ${now}`;
+
+  await sendDocument(token, chatId, threadId, filePath, caption);
+  try { fs.unlinkSync(filePath); } catch {}
+  console.log(`[pendingReport] ТУ ${user.login}: отправлено ${rows.length} строк`);
+}
+
+/**
+ * Отправляет отчёты по всем ТУ у кого есть непринятые накладные.
+ */
+async function sendAllTuReports(cfg, chatId, threadId) {
+  const token = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+  if (!token) return;
+
+  const [users, dist, allPending] = await Promise.all([
+    fetchLoginsList(cfg),
+    fetchDistribution(cfg),
+    fetchPendingRows(cfg),
+  ]);
+
+  const pendingSet = new Set(allPending.map(r => r.object));
+  const now        = new Date().toISOString().slice(0, 10);
+  let   sent       = 0;
+
+  for (const user of users) {
+    if (user.role === 'admin') continue;
+    const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
+    const userObjs = new Set(dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object));
+    const rows     = allPending.filter(r => userObjs.has(r.object));
+
+    if (rows.length === 0) continue;
+
+    const fileName = `${user.login}_pending_${now}`;
+    const filePath = await buildTuExcel(rows, fileName);
+    const tagStr   = user.tag ? `@${user.tag} ` : '';
+    const caption  = `${tagStr}${user.firstName} ${user.lastName}\nНепринятые накладные: ${rows.length} шт.\nСформировано: ${now}`;
+
+    await sendDocument(token, chatId, threadId, filePath, caption);
+    try { fs.unlinkSync(filePath); } catch {}
+    console.log(`[pendingReport] ТУ ${user.login}: ${rows.length} строк`);
+    sent++;
+  }
+
+  if (sent === 0) {
+    const { sendMessage } = require('./telegram');
+    await sendMessage(token, chatId, '✅ У всех ТУ накладные приняты.', threadId, 0);
+  }
+}
+
+module.exports = { sendPendingReport, sendTuReport, sendAllTuReports };
