@@ -211,8 +211,8 @@ function answerCbq(token, cbqId, text) {
 async function showAuthScreen(token, chatId, messageId) {
   const text = 'Привет ТУ, авторизуйся:';
   const kbd  = [
-    [{ text: '🔑 Авторизация по логину', callback_data: 'mu:authlogin' }],
-    [{ text: '👤 Авторизация по тегу',   callback_data: 'mu:authtag'   }],
+    [{ text: 'Авторизация по логину', callback_data: 'mu:authlogin' }],
+    [{ text: 'Авторизация по тегу',   callback_data: 'mu:authtag'   }],
   ];
   if (messageId) return editMsg(token, chatId, messageId, text, kbd);
   return sendMsg(token, chatId, text, kbd);
@@ -345,8 +345,8 @@ async function handleMenuText(msg, token) {
     if (!user) {
       sessions.set(chatId, { step: 'auth' });
       await sendMsg(token, chatId, 'Повтори вход или авторизуйся по тегу:', [
-        [{ text: '🔑 Авторизация по логину', callback_data: 'mu:authlogin' }],
-        [{ text: '👤 Авторизация по тегу',   callback_data: 'mu:authtag'   }],
+        [{ text: 'Авторизация по логину', callback_data: 'mu:authlogin' }],
+        [{ text: 'Авторизация по тегу',   callback_data: 'mu:authtag'   }],
       ]);
       return true;
     }
