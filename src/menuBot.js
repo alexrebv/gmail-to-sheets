@@ -23,7 +23,7 @@ async function getLogins(cfg) {
   const sheets = getSheetsClient(auth);
   const res    = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SPREADSHEET_ID,
-    range: `'${cfg.SHEET_LOGINS || 'Logins'}'!A2:E`,
+    range: `'${cfg.SHEET_LOGINS || 'Logins'}'!A2:F`,
   });
   _loginsCache = (res.data.values || []).map(r => ({
     firstName: (r[0] || '').trim(),
@@ -31,6 +31,7 @@ async function getLogins(cfg) {
     login:     (r[2] || '').trim().toLowerCase(),
     password:  (r[3] || '').trim(),
     tag:       (r[4] || '').trim().replace(/^@/, '').toLowerCase(),
+    role:      (r[5] || '').trim().toLowerCase(),
   })).filter(u => u.login);
   _loginsCacheTime = Date.now();
   return _loginsCache;
@@ -225,7 +226,8 @@ async function showStatsScreen(token, chatId, messageId, id, state) {
     return `${obj} — ${count} шт.`;
   }).sort();
 
-  const text = `<b>${user.firstName} ${user.lastName}</b>\n\nНепринятые накладные:\n\n${lines.join('\n')}`;
+  const adminTag = user.role === 'admin' ? ' 👑 Admin' : '';
+  const text = `<b>${user.firstName} ${user.lastName}${adminTag}</b>\n\nНепринятые накладные:\n\n${lines.join('\n')}`;
   const kbd  = [[{ text: '📋 Перейти к объектам', callback_data: `mu:objs:${id}:0` }]];
 
   if (messageId) return editMsg(token, chatId, messageId, text, kbd);
@@ -296,11 +298,11 @@ async function showActionScreen(token, chatId, messageId, id, state, objIdx, inv
 async function enterMenu(token, chatId, messageId, user, cfg) {
   const [dist, invoices] = await Promise.all([getDistribution(cfg), loadPendingInvoices(cfg)]);
 
+  const isAdmin  = user.role === 'admin';
   const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
-  const objects  = dist
-    .filter(d => d.manager.trim().toLowerCase() === fullName)
-    .map(d => d.object)
-    .sort();
+  const objects  = isAdmin
+    ? [...new Set(dist.map(d => d.object))].sort()
+    : dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object).sort();
 
   if (objects.length === 0) {
     const text = `✅ ${user.firstName}, вы авторизованы.\nОбъекты не найдены в листе Распределение.`;
