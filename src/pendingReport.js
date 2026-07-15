@@ -322,11 +322,20 @@ async function sendTuReport(login, cfg, chatId, threadId) {
   }
 
   const now      = new Date().toISOString().slice(0, 10);
-  const fileName = `${user.login}_pending_${now}`;
-  const filePath = await buildTuExcel(rows, fileName);
+  const filePath = await buildTuExcel(rows, user.login);
 
-  const tagStr = user.tag ? `@${user.tag} ` : '';
-  const caption = `${tagStr}${user.firstName} ${user.lastName}\nНепринятые накладные: ${rows.length} шт.\nСформировано: ${now}`;
+  // Теги УПР у которых есть объекты в этом отчёте
+  const uprNames = [...new Set(dist.filter(d => userObjs.has(d.object) && d.upr).map(d => d.upr.trim()))];
+  const uprTags  = uprNames
+    .map(name => {
+      const u = users.find(u => `${u.firstName} ${u.lastName}`.trim().toLowerCase() === name.toLowerCase());
+      return u?.tag ? `@${u.tag}` : '';
+    })
+    .filter(Boolean).join(' ');
+
+  const tagStr  = user.tag ? `@${user.tag} ` : '';
+  const uprStr  = uprTags ? ` ${uprTags}` : '';
+  const caption = `${tagStr}${user.firstName} ${user.lastName}${uprStr}\nНепринятые накладные: ${rows.length} шт.\nСформировано: ${now}`;
 
   await sendDocument(token, chatId, threadId, filePath, caption);
   try { fs.unlinkSync(filePath); } catch {}
@@ -371,8 +380,7 @@ async function sendAllTuReports(cfg, chatId, threadId) {
       .filter(Boolean)
       .join(' ');
 
-    const fileName = `${user.login}_pending_${now}`;
-    const filePath = await buildTuExcel(rows, fileName);
+    const filePath = await buildTuExcel(rows, user.login);
     const tagStr   = user.tag ? `@${user.tag} ` : '';
     const uprStr   = uprTags ? ` ${uprTags}` : '';
     const caption  = `${tagStr}${user.firstName} ${user.lastName}${uprStr}\nНепринятые накладные: ${rows.length} шт.\nСформировано: ${now}`;
