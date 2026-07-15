@@ -309,6 +309,7 @@ async function enterMenu(token, chatId, messageId, user, cfg) {
       : dist.filter(d => d.tu.trim().toLowerCase() === fullName).map(d => d.object).sort();
 
   if (objects.length === 0) {
+    console.log(`[menuBot] ${isUpr ? 'UPR' : 'TU'} fullName="${fullName}", dist upr values:`, dist.map(d => d.upr).filter(Boolean).slice(0, 5));
     const text = `${user.firstName}, вы авторизованы.\nОбъекты не найдены в листе Распределение.`;
     if (messageId) return editMsg(token, chatId, messageId, text, []);
     return sendMsg(token, chatId, text, null);
