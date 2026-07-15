@@ -22,7 +22,7 @@
 const { getAuthClient, getSheetsClient } = require('./auth');
 const { getConfig } = require('./config');
 const { parseDateStr, todayDateKey } = require('./dateUtils');
-const { sendPendingReport } = require('./pendingReport');
+const { sendPendingReport, sendAllTuReports } = require('./pendingReport');
 
 const COL = {
   SENT: {
@@ -172,7 +172,8 @@ async function updateOrderStatusAndNotify() {
   }
 
   await sendPendingReport(CHAT_ID, THREAD_ID, cfg);
-  console.log('[checkStatus] Отчёт отправлен.');
+  await sendAllTuReports(cfg, CHAT_ID, THREAD_ID);
+  console.log('[checkStatus] Отчёты отправлены.');
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
