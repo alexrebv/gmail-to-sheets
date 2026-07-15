@@ -141,6 +141,53 @@ function extractOrderTotal(html) {
   return null;
 }
 
+// ── Кэш Распределение + Logins ───────────────────────────────────────────────
+
+let _distCache = null, _distCacheTime = 0;
+let _loginsCache = null, _loginsCacheTime = 0;
+const DIST_TTL = 5 * 60 * 1000;
+
+async function getDistribution(cfg) {
+  if (_distCache && Date.now() - _distCacheTime < DIST_TTL) return _distCache;
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:C`,
+  });
+  _distCache = (res.data.values || []).map(r => ({
+    object: (r[0] || '').trim(),
+    tu:     (r[1] || '').trim(),
+    upr:    (r[2] || '').trim(),
+  })).filter(d => d.object);
+  _distCacheTime = Date.now();
+  return _distCache;
+}
+
+async function getLogins(cfg) {
+  if (_loginsCache && Date.now() - _loginsCacheTime < DIST_TTL) return _loginsCache;
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `'${cfg.SHEET_LOGINS || 'Logins'}'!A2:F`,
+  });
+  _loginsCache = (res.data.values || []).map(r => ({
+    firstName: (r[0] || '').trim(),
+    lastName:  (r[1] || '').trim(),
+    tag:       (r[4] || '').trim().replace(/^@/, ''),
+  })).filter(u => u.firstName);
+  _loginsCacheTime = Date.now();
+  return _loginsCache;
+}
+
+function findTagByName(fullName, loginsList) {
+  const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const n    = norm(fullName);
+  const user = loginsList.find(u => norm(`${u.firstName} ${u.lastName}`) === n);
+  return user?.tag || '';
+}
+
 // ── Кэш поставщиков ───────────────────────────────────────────────────────────
 
 let _suppliersCache    = null;
@@ -271,7 +318,11 @@ async function processGmailOrders() {
     const processedIds = [];
     const minimalkaRows = []; // строки для листа Минималка
 
-    const supplierMins = await getSupplierMinimums(cfg).catch(() => new Map());
+    const [supplierMins, dist, loginsList] = await Promise.all([
+      getSupplierMinimums(cfg).catch(() => new Map()),
+      getDistribution(cfg).catch(() => []),
+      getLogins(cfg).catch(() => []),
+    ]);
 
     for (const id of messageIds) {
       const res = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
@@ -345,7 +396,18 @@ async function processGmailOrders() {
         for (const r of minimalkaRows) {
           if (r.total < r.minAmount) {
             const minStr = r.minAmount.toString().replace('.', ',');
-            const text = `${r.object}\n${r.supplier}\nСумма: ${r.totalStr}\n\nМинималка не набрана\nНужно ${minStr}`;
+
+            // Ищем управляющего (Upr, столбец C) или ТУ (столбец B) для объекта
+            const distRow = dist.find(d => d.object === r.object);
+            let tagStr = '';
+            if (distRow) {
+              const uprTag = distRow.upr ? findTagByName(distRow.upr, loginsList) : '';
+              const tuTag  = distRow.tu  ? findTagByName(distRow.tu,  loginsList) : '';
+              const tag    = uprTag || tuTag;
+              if (tag) tagStr = `@${tag} `;
+            }
+
+            const text = `${tagStr}${r.object}\n${r.supplier}\nСумма: ${r.totalStr}\n\nМинималка не набрана\nНужно ${minStr}`;
             await tgPostGmail(token, chatId, threadId, text).catch(e =>
               console.error(`[gmail] Telegram notify error: ${e.message}`)
             );

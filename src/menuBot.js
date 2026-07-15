@@ -3,7 +3,7 @@
  *
  * Листы:
  *   Logins        — Имя | Фамилия | Логин | Пароль | Tag
- *   Распределение — Объект | Управляющий
+ *   Распределение — Объект | ТУ (B) | Управляющий Upr (C)
  */
 
 const https = require('https');
@@ -43,12 +43,13 @@ async function getDistribution(cfg) {
   const sheets = getSheetsClient(auth);
   const res    = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SPREADSHEET_ID,
-    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:B`,
+    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:C`,
   });
   _distCache = (res.data.values || []).map(r => ({
     object:  (r[0] || '').trim(),
-    manager: (r[1] || '').trim(),
-  })).filter(d => d.object && d.manager);
+    tu:      (r[1] || '').trim(),
+    upr:     (r[2] || '').trim(),
+  })).filter(d => d.object && d.tu);
   _distCacheTime = Date.now();
   return _distCache;
 }
@@ -299,10 +300,13 @@ async function enterMenu(token, chatId, messageId, user, cfg) {
   const [dist, invoices] = await Promise.all([getDistribution(cfg), loadPendingInvoices(cfg)]);
 
   const isAdmin  = user.role === 'admin';
+  const isUpr    = user.role === 'upr';
   const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
   const objects  = isAdmin
     ? [...new Set(dist.map(d => d.object))].sort()
-    : dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object).sort();
+    : isUpr
+      ? dist.filter(d => d.upr.trim().toLowerCase() === fullName).map(d => d.object).sort()
+      : dist.filter(d => d.tu.trim().toLowerCase() === fullName).map(d => d.object).sort();
 
   if (objects.length === 0) {
     const text = `${user.firstName}, вы авторизованы.\nОбъекты не найдены в листе Распределение.`;

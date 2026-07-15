@@ -246,12 +246,13 @@ async function fetchDistribution(cfg) {
   const sheets = getSheetsClient(auth);
   const res    = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SPREADSHEET_ID,
-    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:B`,
+    range: `'${cfg.SHEET_DIST || 'Распределение'}'!A2:C`,
   });
   return (res.data.values || []).map(r => ({
-    object:  (r[0] || '').trim(),
-    manager: (r[1] || '').trim(),
-  })).filter(d => d.object && d.manager);
+    object: (r[0] || '').trim(),
+    tu:     (r[1] || '').trim(),
+    upr:    (r[2] || '').trim(),
+  })).filter(d => d.object && d.tu);
 }
 
 async function buildTuExcel(rows, tuName) {
@@ -309,7 +310,7 @@ async function sendTuReport(login, cfg, chatId, threadId) {
   }
 
   const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
-  const userObjs = new Set(dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object));
+  const userObjs = new Set(dist.filter(d => d.tu.trim().toLowerCase() === fullName).map(d => d.object));
 
   const rows = allPending.filter(r => userObjs.has(r.object));
 
@@ -352,7 +353,7 @@ async function sendAllTuReports(cfg, chatId, threadId) {
   for (const user of users) {
     if (user.role === 'admin') continue;
     const fullName = `${user.firstName} ${user.lastName}`.trim().toLowerCase();
-    const userObjs = new Set(dist.filter(d => d.manager.trim().toLowerCase() === fullName).map(d => d.object));
+    const userObjs = new Set(dist.filter(d => d.tu.trim().toLowerCase() === fullName).map(d => d.object));
     const rows     = allPending.filter(r => userObjs.has(r.object));
 
     if (rows.length === 0) continue;
