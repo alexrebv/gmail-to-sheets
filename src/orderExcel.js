@@ -47,12 +47,12 @@ function parseDeliveryDate(html) {
 function parseOrderItems(html) {
   if (!html) return [];
   const items = [];
-  // Ищем только строки у которых есть column0 style12 — не парсим весь документ
-  const rowRegex = /<tr[^>]*>(?:(?!<\/tr>)[\s\S])*?column0 style12[\s\S]*?<\/tr>/gi;
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let rowMatch;
 
   while ((rowMatch = rowRegex.exec(html)) !== null) {
-    const rowHtml = rowMatch[0];
+    const rowHtml = rowMatch[1];
+    if (!rowHtml.includes('column0 style12')) continue;
 
     const artM = rowHtml.match(/<td[^>]*class="column0 style12[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
     if (!artM) continue;
@@ -110,7 +110,8 @@ function colLetter(n) {
  */
 async function buildSupplierExcel(supplier, orders) {
   // ── Дата для имени листа — из первого заказа (дата доставки или заказа) ──
-  const dateLabel = (orders[0].deliveryDate || orders[0].orderDate || '').replace(/\s+/g, '');
+  const dateLabel = (orders[0].deliveryDate || orders[0].orderDate || '')
+    .replace(/\//g, '.').replace(/:/g, '-').trim();
 
   const wb = new ExcelJS.Workbook();
   const sheetName = (dateLabel || new Date().toLocaleDateString('ru-RU')).substring(0, 31);

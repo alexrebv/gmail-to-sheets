@@ -549,7 +549,8 @@ async function reprocessTodayOrders() {
       const items = parseOrderItems(htmlBody);
       const deliveryDate = parseDeliveryDate(htmlBody);
 
-      console.log(`[reprocess] ${object} | ${orderNumber} | ${supplier} | items: ${items.length}`);
+      const hasStyle12 = htmlBody.includes('column0 style12');
+      console.log(`[reprocess] ${object} | ${orderNumber} | ${supplier} | items: ${items.length} | hasStyle12: ${hasStyle12}`);
 
       if (items.length > 0) {
         orderExcelData.push({ supplier, object, orderNumber, orderDate, deliveryDate, items, total });
