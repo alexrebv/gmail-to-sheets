@@ -47,11 +47,12 @@ function parseDeliveryDate(html) {
 function parseOrderItems(html) {
   if (!html) return [];
   const items = [];
-  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  // Ищем только строки у которых есть column0 style12 — не парсим весь документ
+  const rowRegex = /<tr[^>]*>(?:(?!<\/tr>)[\s\S])*?column0 style12[\s\S]*?<\/tr>/gi;
   let rowMatch;
 
   while ((rowMatch = rowRegex.exec(html)) !== null) {
-    const rowHtml = rowMatch[1];
+    const rowHtml = rowMatch[0];
 
     const artM = rowHtml.match(/<td[^>]*class="column0 style12[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
     if (!artM) continue;
@@ -265,12 +266,22 @@ function sendDocument(token, chatId, threadId, filePath, caption) {
   });
 }
 
+function logTgResponse(supplier, resp) {
+  if (!resp.ok) {
+    console.error(`[orderExcel] Telegram error for ${supplier}: ${JSON.stringify(resp)}`);
+  } else {
+    console.log(`[orderExcel] Telegram ok for ${supplier}, message_id=${resp.result?.message_id}`);
+  }
+}
+
 /**
  * Главная точка входа — вызывается из gmail.js после парсинга писем.
  * @param {Array}  parsedOrders — [{supplier, object, orderNumber, orderDate, deliveryDate, items, total}]
  * @param {object} cfg
  */
 async function sendOrderExcelReports(parsedOrders, cfg) {
+  console.log(`[orderExcel] called: ${parsedOrders.length} orders, ENABLE_ORDER_EXCEL=${cfg.ENABLE_ORDER_EXCEL}`);
+
   // Флаг быстрого отключения
   if ((cfg.ENABLE_ORDER_EXCEL || '').toString().toLowerCase() === 'false') {
     console.log('[orderExcel] Отключено (ENABLE_ORDER_EXCEL=false)');
@@ -280,6 +291,7 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
   const token    = cfg.TELEGRAM_TOKEN    || process.env.TELEGRAM_TOKEN;
   const chatId   = cfg.TELEGRAM_CHAT_ID  || process.env.TELEGRAM_CHAT_ID;
   const threadId = cfg.TELEGRAM_THREAD_ID || process.env.TELEGRAM_THREAD_ID || null;
+  console.log(`[orderExcel] token=${token ? 'set' : 'MISSING'} chatId=${chatId || 'MISSING'} threadId=${threadId}`);
   if (!token || !chatId) return;
 
   // Группируем по поставщику
@@ -302,9 +314,9 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
       const filePath = await buildSupplierExcel(supplier, orders);
       const totalItems = orders.reduce((s, o) => s + o.items.length, 0);
       const caption = `${supplier}\nЗаказов: ${orders.length} | Позиций: ${totalItems}\n${now}`;
-      await sendDocument(token, chatId, threadId, filePath, caption);
+      const resp = await sendDocument(token, chatId, threadId, filePath, caption);
+      logTgResponse(supplier, resp);
       try { fs.unlinkSync(filePath); } catch {}
-      console.log(`[orderExcel] Отправлен: ${supplier} (${orders.length} заказов, ${totalItems} позиций)`);
     } catch (e) {
       console.error(`[orderExcel] Ошибка для ${supplier}: ${e.message}`);
     }

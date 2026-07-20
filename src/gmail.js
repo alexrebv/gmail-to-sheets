@@ -42,14 +42,24 @@ function decodeQuotedPrintable(str) {
   let i = 0;
   while (i < clean.length) {
     if (clean[i] === '=' && i + 2 < clean.length) {
-      bytes.push(parseInt(clean.slice(i + 1, i + 3), 16));
-      i += 3;
-    } else {
-      bytes.push(clean.charCodeAt(i));
-      i++;
+      const hex = clean.slice(i + 1, i + 3);
+      const byte = parseInt(hex, 16);
+      if (!isNaN(byte)) {
+        bytes.push(byte);
+        i += 3;
+        continue;
+      }
     }
+    const code = clean.charCodeAt(i);
+    bytes.push(code > 127 ? 63 : code); // '?' for unexpected non-ASCII
+    i++;
   }
   return Buffer.from(bytes).toString('utf-8');
+}
+
+function looksLikeQP(str) {
+  // QP-encoded text has soft line breaks =\n or high-byte sequences like =D0=91
+  return /=\r?\n/.test(str) || /=[0-9A-Fa-f]{2}/.test(str);
 }
 
 function extractByMime(payload, mimeType) {
@@ -58,7 +68,10 @@ function extractByMime(payload, mimeType) {
     const raw = decodeBody(payload.body.data);
     const headers = payload.headers || [];
     const cte = headers.find(h => h.name.toLowerCase() === 'content-transfer-encoding')?.value || '';
-    return cte.toLowerCase().includes('quoted-printable') ? decodeQuotedPrintable(raw) : raw;
+    const isQP = cte.toLowerCase().includes('quoted-printable') || looksLikeQP(raw);
+    const result = isQP ? decodeQuotedPrintable(raw) : raw;
+    console.log(`[gmail] extractByMime ${mimeType}: len=${raw.length} isQP=${isQP} cte="${cte}"`);
+    return result;
   }
   if (payload.parts) {
     for (const part of payload.parts) {
