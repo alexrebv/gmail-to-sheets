@@ -68,7 +68,7 @@ function extractByMime(payload, mimeType) {
     // но оставлять заголовок quoted-printable, что приводит к двойному декоду.
     const isQP = /=\r?\n/.test(raw);
     const result = isQP ? decodeQuotedPrintable(raw) : raw;
-    console.log(`[gmail] extractByMime ${mimeType}: len=${raw.length} isQP=${isQP} cte="${cte}"`);
+    console.log(`[gmail] extractByMime ${mimeType}: len=${raw.length} isQP=${isQP}`);
     return result;
   }
   if (payload.parts) {
