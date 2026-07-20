@@ -550,7 +550,12 @@ async function reprocessTodayOrders() {
       const deliveryDate = parseDeliveryDate(htmlBody);
 
       const hasStyle12 = htmlBody.includes('column0 style12');
-      console.log(`[reprocess] ${object} | ${orderNumber} | ${supplier} | items: ${items.length} | hasStyle12: ${hasStyle12}`);
+      console.log(`[reprocess] ${object} | ${orderNumber} | ${supplier} | items: ${items.length} | hasStyle12: ${hasStyle12} | htmlLen: ${htmlBody.length}`);
+      if (items.length === 0 && htmlBody.length > 100) {
+        // Показываем какие column-классы есть в HTML для диагностики
+        const foundClasses = [...new Set((htmlBody.match(/class="column\d+ style\d+[^"]*"/g) || []))].slice(0, 10);
+        console.log(`[reprocess] classes in html: ${foundClasses.join(', ')}`);
+      }
 
       if (items.length > 0) {
         orderExcelData.push({ supplier, object, orderNumber, orderDate, deliveryDate, items, total });
