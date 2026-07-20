@@ -294,10 +294,11 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
   console.log(`[orderExcel] token=${token ? 'set' : 'MISSING'} chatId=${chatId || 'MISSING'} threadId=${threadId}`);
   if (!token || !chatId) return;
 
-  // Группируем по поставщику
+  // Группируем по поставщику (если не определён — «Поставщик не определён»)
   const bySupplier = new Map();
   for (const order of parsedOrders) {
-    if (!order.supplier || order.items.length === 0) continue;
+    if (order.items.length === 0) continue;
+    if (!order.supplier) order.supplier = 'Поставщик не определён';
     if (!bySupplier.has(order.supplier)) bySupplier.set(order.supplier, []);
     bySupplier.get(order.supplier).push(order);
   }

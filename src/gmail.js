@@ -63,10 +63,10 @@ function extractByMime(payload, mimeType) {
   if (payload.mimeType === mimeType && payload.body?.data) {
     const raw = decodeBody(payload.body.data);
     const headers = payload.headers || [];
-    const cte = (headers.find(h => h.name.toLowerCase() === 'content-transfer-encoding')?.value || '').toLowerCase();
-    // Определяем QP только по заголовку или по наличию soft line breaks (=\n) —
-    // НЕ по =xx паттерну, иначе normal HTML с CSS/URL будет ложно декодирован
-    const isQP = cte.includes('quoted-printable') || /=\r?\n/.test(raw);
+    // Определяем QP только по содержимому (soft line breaks =\n) —
+    // заголовок CTE не используем: Gmail API может уже декодировать QP,
+    // но оставлять заголовок quoted-printable, что приводит к двойному декоду.
+    const isQP = /=\r?\n/.test(raw);
     const result = isQP ? decodeQuotedPrintable(raw) : raw;
     console.log(`[gmail] extractByMime ${mimeType}: len=${raw.length} isQP=${isQP} cte="${cte}"`);
     return result;
