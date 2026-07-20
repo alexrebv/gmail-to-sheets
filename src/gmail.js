@@ -36,10 +36,29 @@ function decodeBody(data) {
   return Buffer.from(base64, 'base64').toString('utf-8');
 }
 
+function decodeQuotedPrintable(str) {
+  const clean = str.replace(/=\r?\n/g, '');
+  const bytes = [];
+  let i = 0;
+  while (i < clean.length) {
+    if (clean[i] === '=' && i + 2 < clean.length) {
+      bytes.push(parseInt(clean.slice(i + 1, i + 3), 16));
+      i += 3;
+    } else {
+      bytes.push(clean.charCodeAt(i));
+      i++;
+    }
+  }
+  return Buffer.from(bytes).toString('utf-8');
+}
+
 function extractByMime(payload, mimeType) {
   if (!payload) return '';
   if (payload.mimeType === mimeType && payload.body?.data) {
-    return decodeBody(payload.body.data);
+    const raw = decodeBody(payload.body.data);
+    const headers = payload.headers || [];
+    const cte = headers.find(h => h.name.toLowerCase() === 'content-transfer-encoding')?.value || '';
+    return cte.toLowerCase().includes('quoted-printable') ? decodeQuotedPrintable(raw) : raw;
   }
   if (payload.parts) {
     for (const part of payload.parts) {
