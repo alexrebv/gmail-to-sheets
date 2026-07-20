@@ -2,6 +2,7 @@ const https = require('https');
 const { getGmailClient, getAuthClient, getSheetsClient } = require('./auth');
 const { appendRowsToSheet, ensureSheetExists } = require('./sheets');
 const { getConfig } = require('./config');
+const { parseOrderItems, parseDeliveryDate, sendOrderExcelReports } = require('./orderExcel');
 
 /**
  * Убирает суффиксы ФГ, ДР, DR, DP, GSW в конце названия объекта
@@ -317,6 +318,7 @@ async function processGmailOrders() {
     const newRows = [];
     const processedIds = [];
     const minimalkaRows = []; // строки для листа Минималка
+    const orderExcelData = []; // данные для Excel-отчётов по поставщикам
 
     const [supplierMins, dist, loginsList] = await Promise.all([
       getSupplierMinimums(cfg).catch(() => new Map()),
@@ -364,8 +366,20 @@ async function processGmailOrders() {
         }
       }
 
+      // Сбор позиций для Excel-отчёта
+      const items        = parseOrderItems(htmlBody);
+      const deliveryDate = parseDeliveryDate(htmlBody);
+      if (items.length > 0) {
+        orderExcelData.push({
+          supplier: supplier || '',
+          object:   object || subject,
+          orderNumber, orderDate,
+          deliveryDate, items, total,
+        });
+      }
+
       processedIds.push(id);
-      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}${total !== null ? ` | сумма: ${total}` : ''}`);
+      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}${total !== null ? ` | сумма: ${total}` : ''}${items.length > 0 ? ` | позиций: ${items.length}` : ''}`);
     }
 
     const HEADERS = [
@@ -417,6 +431,13 @@ async function processGmailOrders() {
       }
     }
     console.log(`Записано строк: ${newRows.length}`);
+
+    // ── Excel-отчёты по поставщикам ─────────────────────────────────────────
+    if (orderExcelData.length > 0) {
+      await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
+        console.error(`[gmail] orderExcel error: ${e.message}`)
+      );
+    }
 
     for (const id of processedIds) {
       await gmail.users.messages.modify({
