@@ -22,7 +22,7 @@ const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
 const DEFAULT_CRON_END_DAY     = '30 22 * * *';
 const DEFAULT_CRON_BUY         = '0 12,13,14,15,16 * * *';
-const DEFAULT_CRON_REPROCESS   = '*/30 * * * *';
+const DEFAULT_CRON_REPROCESS   = '*/5 * * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
