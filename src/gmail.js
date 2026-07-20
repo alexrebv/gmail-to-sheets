@@ -565,7 +565,8 @@ async function reprocessTodayOrders() {
     await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
       console.error(`[reprocess] orderExcel error: ${e.message}`)
     );
-    await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
+    // overwrite=true: удаляем старые строки этих заказов перед записью (чистый перезапуск)
+    await writeOrderItemsToSheet(orderExcelData, cfg, true).catch(e =>
       console.error(`[reprocess] orderSheet error: ${e.message}`)
     );
 
