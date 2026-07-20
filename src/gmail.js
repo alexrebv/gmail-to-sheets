@@ -297,7 +297,8 @@ async function processGmailOrders() {
     const auth  = await getAuthClient();
     const gmail = getGmailClient(auth);
 
-    const labelId = await getOrCreateLabel(gmail, LABEL_NAME);
+    const labelId   = await getOrCreateLabel(gmail, LABEL_NAME);
+    const goLabelId = await getOrCreateLabel(gmail, 'GO');
     const query = `${SEARCH_QUERY_BASE} after:${AFTER_DATE} -label:${LABEL_NAME}`;
     console.log(`Поиск писем: ${query}`);
 
@@ -319,6 +320,7 @@ async function processGmailOrders() {
     const processedIds = [];
     const minimalkaRows = []; // строки для листа Минималка
     const orderExcelData = []; // данные для Excel-отчётов по поставщикам
+    const orderEmailIds  = []; // id писем у которых распарсились позиции (для лейбла GO)
 
     const [supplierMins, dist, loginsList] = await Promise.all([
       getSupplierMinimums(cfg).catch(() => new Map()),
@@ -376,6 +378,7 @@ async function processGmailOrders() {
           orderNumber, orderDate,
           deliveryDate, items, total,
         });
+        orderEmailIds.push(id);
       }
 
       processedIds.push(id);
@@ -440,12 +443,14 @@ async function processGmailOrders() {
     }
 
     for (const id of processedIds) {
+      const addLabelIds = [labelId];
+      if (orderEmailIds.includes(id)) addLabelIds.push(goLabelId);
       await gmail.users.messages.modify({
         userId: 'me', id,
-        requestBody: { addLabelIds: [labelId] },
+        requestBody: { addLabelIds },
       });
     }
-    console.log(`Помечено писем лейблом "${LABEL_NAME}": ${processedIds.length}`);
+    console.log(`Помечено писем лейблом "${LABEL_NAME}": ${processedIds.length}, лейблом "GO": ${orderEmailIds.length}`);
 
   } catch (err) {
     console.error(`[processGmailOrders] Ошибка: ${err.message}`);
