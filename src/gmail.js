@@ -359,6 +359,8 @@ async function processGmailOrders() {
       const htmlBody  = extractByMime(msg.payload, 'text/html');
       const plainBody = extractByMime(msg.payload, 'text/plain');
 
+      console.log(`[gmail] htmlBody length: ${htmlBody.length}, hasQP: ${htmlBody.includes('=3D') || htmlBody.includes('=D0')}, sample: ${htmlBody.substring(0, 80).replace(/\n/g,' ')}`);
+
       const { object, orderNumber, orderDate } = parseSubject(subject);
       const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
       const total    = extractOrderTotal(htmlBody);
@@ -390,6 +392,7 @@ async function processGmailOrders() {
       // Сбор позиций для Excel-отчёта
       const items        = parseOrderItems(htmlBody);
       const deliveryDate = parseDeliveryDate(htmlBody);
+      console.log(`[gmail] parseOrderItems: ${items.length} items, deliveryDate: ${deliveryDate}`);
       if (items.length > 0) {
         orderExcelData.push({
           supplier: supplier || '',
