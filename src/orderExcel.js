@@ -57,7 +57,7 @@ function parseOrderItems(html) {
     const artM = rowHtml.match(/<td[^>]*class="column0 style12[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
     if (!artM) continue;
     const article = cleanHtml(artM[1]);
-    if (!article || isNaN(article)) continue;
+    if (!article) continue;
 
     const descM  = rowHtml.match(/<td[^>]*class="column1 style13[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
     const qtyM   = rowHtml.match(/<td[^>]*class="column4 style14[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
