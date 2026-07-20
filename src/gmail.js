@@ -58,18 +58,15 @@ function decodeQuotedPrintable(str) {
   return Buffer.from(bytes).toString('utf-8');
 }
 
-function looksLikeQP(str) {
-  // QP-encoded text has soft line breaks =\n or high-byte sequences like =D0=91
-  return /=\r?\n/.test(str) || /=[0-9A-Fa-f]{2}/.test(str);
-}
-
 function extractByMime(payload, mimeType) {
   if (!payload) return '';
   if (payload.mimeType === mimeType && payload.body?.data) {
     const raw = decodeBody(payload.body.data);
     const headers = payload.headers || [];
-    const cte = headers.find(h => h.name.toLowerCase() === 'content-transfer-encoding')?.value || '';
-    const isQP = cte.toLowerCase().includes('quoted-printable') || looksLikeQP(raw);
+    const cte = (headers.find(h => h.name.toLowerCase() === 'content-transfer-encoding')?.value || '').toLowerCase();
+    // Определяем QP только по заголовку или по наличию soft line breaks (=\n) —
+    // НЕ по =xx паттерну, иначе normal HTML с CSS/URL будет ложно декодирован
+    const isQP = cte.includes('quoted-printable') || /=\r?\n/.test(raw);
     const result = isQP ? decodeQuotedPrintable(raw) : raw;
     console.log(`[gmail] extractByMime ${mimeType}: len=${raw.length} isQP=${isQP} cte="${cte}"`);
     return result;
@@ -471,13 +468,12 @@ async function processGmailOrders() {
     }
     console.log(`Записано строк: ${newRows.length}`);
 
-    // ── Excel-отчёты по поставщикам + запись в лист Позиции ────────────────
+    // ── Excel-отчёты по поставщикам ─────────────────────────────────────────
+    // Запись в лист «Позиции» выполняет reprocessTodayOrders (каждые 5 мин),
+    // чтобы не дублировать строки при параллельных запусках.
     if (orderExcelData.length > 0) {
       await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
         console.error(`[gmail] orderExcel error: ${e.message}`)
-      );
-      await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
-        console.error(`[gmail] orderSheet error: ${e.message}`)
       );
     }
 
@@ -534,11 +530,6 @@ async function reprocessTodayOrders() {
     console.log(`[reprocess] Найдено без GO: ${messageIds.length}`);
     if (messageIds.length === 0) return;
 
-    const [, dist, loginsList] = await Promise.all([
-      Promise.resolve(),
-      getDistribution(cfg).catch(() => []),
-      getLogins(cfg).catch(() => []),
-    ]);
 
     const orderExcelData = [];
     const goIds = [];
