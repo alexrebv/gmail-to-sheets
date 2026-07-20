@@ -82,159 +82,133 @@ function parseOrderItems(html) {
 
 // ── Excel ─────────────────────────────────────────────────────────────────────
 
-const C = {
-  GREY:  'FF989595',
-  WHITE: 'FFFFFFFF',
-  BLUE:  'FF6E85BF',
-  LIGHT: 'FFEBEBEB',
-  PINK:  'FFC9A2A2',
-  BLACK: 'FF000000',
-};
+const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+const TOTAL_FILL  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBDD7EE' } };
 
-function border() {
-  const s = { style: 'thin' };
+function thinBorder() {
+  const s = { style: 'thin', color: { argb: 'FF000000' } };
   return { top: s, bottom: s, left: s, right: s };
 }
 
-function applyHeader(cell, bg, fgColor) {
-  cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
-  cell.font   = { bold: true, color: { argb: fgColor || C.WHITE }, name: 'Calibri', size: 11 };
-  cell.border = border();
-  cell.alignment = { vertical: 'bottom' };
+function colLetter(n) {
+  let s = '';
+  while (n > 0) {
+    n--;
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26);
+  }
+  return s;
 }
 
 /**
- * Строит xlsx для одного поставщика со всеми его заказами.
+ * Строит xlsx-пивот для одного поставщика.
+ * Строки = продукты, столбцы = объекты, ячейки = кол-во.
  * @param {string} supplier
  * @param {Array}  orders — [{object, orderNumber, orderDate, deliveryDate, items, total}]
  * @returns {string} путь к временному файлу
  */
 async function buildSupplierExcel(supplier, orders) {
+  // ── Дата для имени листа — из первого заказа (дата доставки или заказа) ──
+  const dateLabel = (orders[0].deliveryDate || orders[0].orderDate || '').replace(/\s+/g, '');
+
   const wb = new ExcelJS.Workbook();
-  const sheetName = supplier.replace(/[:\\\/\?\*\[\]]/g, ' ').substring(0, 31);
+  const sheetName = (dateLabel || new Date().toLocaleDateString('ru-RU')).substring(0, 31);
   const ws = wb.addWorksheet(sheetName);
 
-  ws.columns = [
-    { key: 'c0', width: 18 },
-    { key: 'c1', width: 14 },
-    { key: 'c2', width: 14 },
-    { key: 'c3', width: 14 },
-    { key: 'c4', width: 10 },
-    { key: 'c5', width: 20 },
-    { key: 'c6', width: 18 },
-    { key: 'c7', width: 18 },
-    { key: 'c8', width: 12 },
-    { key: 'c9', width: 18 },
+  // ── Собираем все уникальные объекты (порядок из входных данных) ──────────
+  const objectsOrdered = [];
+  const objectSet = new Set();
+  for (const o of orders) {
+    if (o.object && !objectSet.has(o.object)) {
+      objectSet.add(o.object);
+      objectsOrdered.push(o.object);
+    }
+  }
+
+  // ── Собираем все уникальные продукты (по артикулу) ───────────────────────
+  const productMap = new Map(); // article → {desc, pack}
+  for (const o of orders) {
+    for (const it of o.items) {
+      if (!productMap.has(it.article)) {
+        productMap.set(it.article, { desc: it.desc, pack: it.pack });
+      }
+    }
+  }
+
+  // ── Пивот: article → object → qty ────────────────────────────────────────
+  const pivot = new Map();
+  for (const o of orders) {
+    for (const it of o.items) {
+      if (!pivot.has(it.article)) pivot.set(it.article, new Map());
+      const cur = pivot.get(it.article).get(o.object) || 0;
+      pivot.get(it.article).set(o.object, cur + it.qty);
+    }
+  }
+  const articles = [...productMap.keys()];
+
+  // ── Ширины столбцов ───────────────────────────────────────────────────────
+  // A=Название, B=Артикул, C=Фасовка, D..=объекты, last=Итого
+  const totalCols = 3 + objectsOrdered.length + 1;
+  ws.getColumn(1).width = 36;
+  ws.getColumn(2).width = 18;
+  ws.getColumn(3).width = 32;
+  for (let i = 4; i <= totalCols; i++) ws.getColumn(i).width = 14;
+
+  // ── Строка 1: заголовок ───────────────────────────────────────────────────
+  const headerValues = [
+    `${supplier} - ${dateLabel}`,
+    'Артикул',
+    'Фасовка',
+    ...objectsOrdered,
+    'Итого',
   ];
+  const rh = ws.addRow(headerValues);
+  rh.height = 36;
+  for (let i = 1; i <= totalCols; i++) {
+    const c = rh.getCell(i);
+    c.fill   = HEADER_FILL;
+    c.font   = { bold: true, name: 'Calibri', size: 10 };
+    c.border = thinBorder();
+    c.alignment = { wrapText: true, vertical: 'middle', horizontal: i === 1 ? 'left' : 'center' };
+  }
 
-  for (const order of orders) {
-    // ── Заголовок заказа ────────────────────────────────────────────────
-    const r0 = ws.addRow([order.object, '', '', '', '', '', '', '', '', 'Заказ']);
-    r0.getCell(1).font = { bold: true, size: 16, name: 'Calibri' };
-    r0.getCell(10).font = { bold: true, size: 28, name: 'Calibri' };
-    r0.height = 40;
+  // ── Строки продуктов ──────────────────────────────────────────────────────
+  const dataStartRow = 2;
+  for (let ai = 0; ai < articles.length; ai++) {
+    const art  = articles[ai];
+    const prod = productMap.get(art);
+    const rowN = dataStartRow + ai;
+    const objQtys = objectsOrdered.map(obj => pivot.get(art)?.get(obj) || null);
+    const lastCol  = colLetter(totalCols);
+    const firstObjCol = colLetter(4);
 
-    const r1 = ws.addRow(['', '', '', '', '', '', '', '', 'Дата', order.orderDate]);
-    [9, 10].forEach(i => { r1.getCell(i).border = border(); });
-
-    const r2 = ws.addRow(['', '', '', '', '', '', '', '', 'Заказ #', order.orderNumber]);
-    [9, 10].forEach(i => { r2.getCell(i).border = border(); });
-
-    ws.addRow([]);
-
-    // ── Поставщик / Получатель ───────────────────────────────────────────
-    const r4 = ws.addRow(['Поставщик', '', '', '', 'Получатель', '', '', '', '', '']);
-    ws.mergeCells(r4.number, 1, r4.number, 3);
-    ws.mergeCells(r4.number, 5, r4.number, 10);
-    [1, 5].forEach(i => applyHeader(r4.getCell(i), C.GREY));
-
-    const r5 = ws.addRow([supplier, '', '', '', order.object, '', '', '', '', '']);
-    ws.mergeCells(r5.number, 1, r5.number, 3);
-    ws.mergeCells(r5.number, 5, r5.number, 10);
-    [1, 5].forEach(i => { r5.getCell(i).border = border(); });
-
-    ws.addRow([]);
-
-    // ── Дата доставки ────────────────────────────────────────────────────
-    const r7 = ws.addRow(['Ожидаемая дата доставки', '', '', '', '', '', '', '', '', '']);
-    ws.mergeCells(r7.number, 1, r7.number, 10);
-    const r7c = r7.getCell(1);
-    r7c.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.GREY } };
-    r7c.font   = { color: { argb: C.WHITE }, name: 'Calibri', size: 11 };
-    r7c.border = border();
-    r7c.alignment = { horizontal: 'center' };
-
-    const r8 = ws.addRow([order.deliveryDate || '', '', '', '', '', '', '', '', '', '']);
-    ws.mergeCells(r8.number, 1, r8.number, 10);
-    const r8c = r8.getCell(1);
-    r8c.border = border();
-    r8c.alignment = { horizontal: 'center' };
-
-    ws.addRow([]);
-
-    // ── Заголовки колонок ────────────────────────────────────────────────
-    const rh = ws.addRow([
-      'Номер продукта #', 'Описание', '', '', 'Кол-во',
-      'Упаковка', 'Цена вкл. НДС', 'Сумма вкл. НДС', 'НДС', 'Сумма без НДС',
-    ]);
-    ws.mergeCells(rh.number, 2, rh.number, 4);
-    for (let i = 1; i <= 10; i++) {
-      const c = rh.getCell(i);
-      c.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.GREY } };
-      c.font   = { color: { argb: C.WHITE }, name: 'Calibri', size: 11 };
-      c.border = border();
-    }
-
-    // ── Строки товаров ────────────────────────────────────────────────────
-    for (const item of order.items) {
-      const ri = ws.addRow([
-        item.article, item.desc, '', '', item.qty,
-        item.pack, item.price, item.sum, item.vat, item.net,
-      ]);
-      ws.mergeCells(ri.number, 2, ri.number, 4);
-      for (let i = 1; i <= 10; i++) {
-        const c = ri.getCell(i);
-        c.border = border();
-        if (i >= 7) {
-          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.LIGHT } };
-          c.numFmt = '#,##0.00';
-        }
+    const rowValues = [prod.desc, art, prod.pack, ...objQtys, { formula: `SUM(${firstObjCol}${rowN}:${colLetter(3 + objectsOrdered.length)}${rowN})` }];
+    const ri = ws.addRow(rowValues);
+    for (let i = 1; i <= totalCols; i++) {
+      const c = ri.getCell(i);
+      c.border = thinBorder();
+      c.font   = { name: 'Calibri', size: 10 };
+      if (i >= 4) {
+        c.alignment = { horizontal: 'center', vertical: 'middle' };
       }
     }
+  }
 
-    // ── Итоги ─────────────────────────────────────────────────────────────
-    const totals = [
-      ['Промежуточный итог', order.total, '', ''],
-      ['Стоимость перевозки', '-',         '', ''],
-      ['Другое',             '-',         '', ''],
-      ['Итог',               order.total, '', ''],
-    ];
-    for (let t = 0; t < totals.length; t++) {
-      const [label, val] = totals[t];
-      const rt = ws.addRow(['', '', '', '', '', '', label, val, '', '']);
-      rt.getCell(7).border = border();
-      const vc = rt.getCell(8);
-      vc.border = border();
-      if (t === 3) {
-        // Итог — синий
-        [7, 8, 9, 10].forEach(i => {
-          const c = rt.getCell(i);
-          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.BLUE } };
-          c.border = border();
-        });
-        vc.font = { bold: true, name: 'Calibri' };
-        if (typeof val === 'number') vc.numFmt = '#,##0.00';
-      } else {
-        [8, 9, 10].forEach(i => {
-          rt.getCell(i).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.LIGHT } };
-          rt.getCell(i).border = border();
-        });
-      }
-    }
-
-    // Разделитель между заказами
-    ws.addRow([]);
-    ws.addRow([]);
+  // ── Строка итогов ────────────────────────────────────────────────────────
+  const totalRowN = dataStartRow + articles.length;
+  const totalValues = ['Итого', null, null];
+  for (let ci = 4; ci <= totalCols; ci++) {
+    const col = colLetter(ci);
+    totalValues.push({ formula: `SUM(${col}${dataStartRow}:${col}${totalRowN - 1})` });
+  }
+  const rt = ws.addRow(totalValues);
+  rt.height = 20;
+  for (let i = 1; i <= totalCols; i++) {
+    const c = rt.getCell(i);
+    c.fill   = TOTAL_FILL;
+    c.font   = { bold: true, name: 'Calibri', size: 10 };
+    c.border = thinBorder();
+    if (i >= 4) c.alignment = { horizontal: 'center', vertical: 'middle' };
   }
 
   const now      = new Date().toISOString().slice(0, 10);
