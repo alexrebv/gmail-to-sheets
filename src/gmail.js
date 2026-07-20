@@ -3,6 +3,7 @@ const { getGmailClient, getAuthClient, getSheetsClient } = require('./auth');
 const { appendRowsToSheet, ensureSheetExists } = require('./sheets');
 const { getConfig } = require('./config');
 const { parseOrderItems, parseDeliveryDate, sendOrderExcelReports } = require('./orderExcel');
+const { writeOrderItemsToSheet } = require('./orderSheet');
 
 /**
  * Убирает суффиксы ФГ, ДР, DR, DP, GSW в конце названия объекта
@@ -470,10 +471,13 @@ async function processGmailOrders() {
     }
     console.log(`Записано строк: ${newRows.length}`);
 
-    // ── Excel-отчёты по поставщикам ─────────────────────────────────────────
+    // ── Excel-отчёты по поставщикам + запись в лист Позиции ────────────────
     if (orderExcelData.length > 0) {
       await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
         console.error(`[gmail] orderExcel error: ${e.message}`)
+      );
+      await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
+        console.error(`[gmail] orderSheet error: ${e.message}`)
       );
     }
 
@@ -493,4 +497,100 @@ async function processGmailOrders() {
   }
 }
 
-module.exports = { processGmailOrders };
+/**
+ * Ищет сегодняшние письма с лейблом Transfer но без GO.
+ * Формирует Excel и пишет в лист «Позиции» для тех, у кого распарсились позиции.
+ */
+async function reprocessTodayOrders() {
+  try {
+    const cfg = await getConfig();
+
+    const LABEL_NAME = cfg.GMAIL_LABEL || 'Transfer';
+    const auth  = await getAuthClient();
+    const gmail = getGmailClient(auth);
+
+    const goLabelId = await getOrCreateLabel(gmail, 'GO');
+
+    // Сегодняшняя дата для Gmail-запроса (YYYY/MM/DD)
+    const today = new Date();
+    const yyyy  = today.getFullYear();
+    const mm    = String(today.getMonth() + 1).padStart(2, '0');
+    const dd    = String(today.getDate()).padStart(2, '0');
+    const todayStr = `${yyyy}/${mm}/${dd}`;
+
+    const query = `label:${LABEL_NAME} -label:GO after:${todayStr}`;
+    console.log(`[reprocess] Поиск сегодняшних без GO: ${query}`);
+
+    const messageIds = [];
+    let pageToken;
+    do {
+      const res = await gmail.users.messages.list({
+        userId: 'me', q: query, maxResults: 100, pageToken,
+      });
+      messageIds.push(...(res.data.messages || []).map(m => m.id));
+      pageToken = res.data.nextPageToken;
+    } while (pageToken);
+
+    console.log(`[reprocess] Найдено без GO: ${messageIds.length}`);
+    if (messageIds.length === 0) return;
+
+    const [, dist, loginsList] = await Promise.all([
+      Promise.resolve(),
+      getDistribution(cfg).catch(() => []),
+      getLogins(cfg).catch(() => []),
+    ]);
+
+    const orderExcelData = [];
+    const goIds = [];
+
+    for (const id of messageIds) {
+      const res  = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+      const msg  = res.data;
+      const headers = msg.payload?.headers || [];
+      const subject = headers.find(h => h.name === 'Subject')?.value || '';
+
+      const htmlBody = extractByMime(msg.payload, 'text/html');
+      const plainBody = extractByMime(msg.payload, 'text/plain');
+      const { object, orderNumber, orderDate } = parseSubject(subject);
+      const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
+      const total = extractOrderTotal(htmlBody);
+
+      const items = parseOrderItems(htmlBody);
+      const deliveryDate = parseDeliveryDate(htmlBody);
+
+      console.log(`[reprocess] ${object} | ${orderNumber} | ${supplier} | items: ${items.length}`);
+
+      if (items.length > 0) {
+        orderExcelData.push({ supplier, object, orderNumber, orderDate, deliveryDate, items, total });
+        goIds.push(id);
+      }
+    }
+
+    if (orderExcelData.length === 0) {
+      console.log('[reprocess] Позиций не найдено');
+      return;
+    }
+
+    await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
+      console.error(`[reprocess] orderExcel error: ${e.message}`)
+    );
+    await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
+      console.error(`[reprocess] orderSheet error: ${e.message}`)
+    );
+
+    // Ставим лейбл GO на обработанные письма
+    for (const id of goIds) {
+      await gmail.users.messages.modify({
+        userId: 'me', id,
+        requestBody: { addLabelIds: [goLabelId] },
+      }).catch(e => console.error(`[reprocess] label GO error: ${e.message}`));
+    }
+    console.log(`[reprocess] GO поставлен на ${goIds.length} писем`);
+
+  } catch (err) {
+    console.error(`[reprocessTodayOrders] Ошибка: ${err.message}`);
+    if (err.stack) console.error(err.stack);
+  }
+}
+
+module.exports = { processGmailOrders, reprocessTodayOrders };

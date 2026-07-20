@@ -11,7 +11,7 @@
 require('dotenv').config();
 process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
 const cron = require('node-cron');
-const { processGmailOrders }                          = require('./gmail');
+const { processGmailOrders, reprocessTodayOrders }    = require('./gmail');
 const { sendOrdersToTelegram }                        = require('./sendOrders');
 const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus');
 const { startChannelBot, sendTodayOrders }            = require('./channelBot');
@@ -22,6 +22,7 @@ const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
 const DEFAULT_CRON_END_DAY     = '30 22 * * *';
 const DEFAULT_CRON_BUY         = '0 12,13,14,15,16 * * *';
+const DEFAULT_CRON_REPROCESS   = '*/30 * * * *';
 
 async function start() {
   console.log(`[${ts()}] ═══ Gmail → Sheets worker запущен ═══`);
@@ -42,12 +43,14 @@ async function start() {
   const cronStatus     = cfg.CRON_STATUS      || DEFAULT_CRON_STATUS;
   const cronEndDay     = cfg.CRON_END_DAY     || DEFAULT_CRON_END_DAY;
   const cronBuy        = cfg.CRON_BUY         || DEFAULT_CRON_BUY;
+  const cronReprocess  = cfg.CRON_REPROCESS   || DEFAULT_CRON_REPROCESS;
 
   console.log(`  Gmail reader   : ${cronGmail}`);
   console.log(`  Send orders TG : ${cronSendOrders}`);
   console.log(`  Check status   : ${cronStatus}`);
   console.log(`  End of day     : ${cronEndDay}`);
   console.log(`  Today orders   : ${cronBuy}`);
+  console.log(`  Reprocess GO   : ${cronReprocess}`);
 
   // 3. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
@@ -58,6 +61,7 @@ async function start() {
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
   cron.schedule(cronEndDay,     () => run('End of day report',       runEndDay));
   cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));
+  cron.schedule(cronReprocess,  () => run('Reprocess today GO',      reprocessTodayOrders));
 }
 
 async function runEndDay() {
