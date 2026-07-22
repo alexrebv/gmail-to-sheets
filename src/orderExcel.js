@@ -275,6 +275,49 @@ function logTgResponse(supplier, resp) {
   }
 }
 
+// ── Накопитель заказов за текущий день ────────────────────────────────────────
+// supplier → { orders: [], date: 'YYYY-MM-DD' }
+// При повторном поступлении новых объектов в тот же день — мержим и пересылаем.
+const _dayAccumulator = new Map();
+
+function _todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Добавляет новые заказы в накопитель.
+ * Возвращает { allOrders, newObjects } для каждого поставщика.
+ */
+function _accumulateOrders(supplier, newOrders) {
+  const today = _todayKey();
+  if (!_dayAccumulator.has(supplier)) {
+    _dayAccumulator.set(supplier, { orders: [], date: today });
+  }
+  const acc = _dayAccumulator.get(supplier);
+  // Сброс на новый день
+  if (acc.date !== today) {
+    acc.orders = [];
+    acc.date = today;
+  }
+
+  // Объекты которые уже были
+  const existingObjects = new Set(acc.orders.map(o => o.object));
+  // Новые объекты (ранее не приходившие от этого поставщика сегодня)
+  const newObjects = newOrders
+    .filter(o => !existingObjects.has(o.object))
+    .map(o => o.object);
+
+  // Добавляем только реально новые объекты (дедупликация по object)
+  for (const o of newOrders) {
+    if (!existingObjects.has(o.object)) {
+      acc.orders.push(o);
+      existingObjects.add(o.object);
+    }
+  }
+
+  return { allOrders: acc.orders, newObjects };
+}
+
 /**
  * Главная точка входа — вызывается из gmail.js после парсинга писем.
  * @param {Array}  parsedOrders — [{supplier, object, orderNumber, orderDate, deliveryDate, items, total}]
@@ -309,13 +352,29 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
     return;
   }
 
-  const now = new Date().toISOString().slice(0, 10);
+  const now = _todayKey();
 
-  for (const [supplier, orders] of bySupplier) {
+  for (const [supplier, newOrders] of bySupplier) {
     try {
-      const filePath = await buildSupplierExcel(supplier, orders);
-      const totalItems = orders.reduce((s, o) => s + o.items.length, 0);
-      const caption = `${supplier}\nЗаказов: ${orders.length} | Позиций: ${totalItems}\n${now}`;
+      const isFirstBatch = !_dayAccumulator.has(supplier) ||
+        _dayAccumulator.get(supplier).date !== now ||
+        _dayAccumulator.get(supplier).orders.length === 0;
+
+      const { allOrders, newObjects } = _accumulateOrders(supplier, newOrders);
+
+      if (!isFirstBatch && newObjects.length === 0) {
+        console.log(`[orderExcel] ${supplier}: нет новых объектов, пропускаем`);
+        continue;
+      }
+
+      const filePath   = await buildSupplierExcel(supplier, allOrders);
+      const totalItems = allOrders.reduce((s, o) => s + o.items.length, 0);
+
+      let caption = `${supplier}\nЗаказов: ${allOrders.length} | Позиций: ${totalItems}\n${now}`;
+      if (!isFirstBatch && newObjects.length > 0) {
+        caption += `\n⚠️ Добавился объект: ${newObjects.join(', ')}`;
+      }
+
       const resp = await sendDocument(token, chatId, threadId, filePath, caption);
       logTgResponse(supplier, resp);
       try { fs.unlinkSync(filePath); } catch {}
