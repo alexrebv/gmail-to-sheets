@@ -468,12 +468,16 @@ async function processGmailOrders() {
     }
     console.log(`Записано строк: ${newRows.length}`);
 
-    // ── Excel-отчёты по поставщикам ─────────────────────────────────────────
-    // Запись в лист «Позиции» выполняет reprocessTodayOrders (каждые 5 мин),
-    // чтобы не дублировать строки при параллельных запусках.
+    // ── Excel-отчёты по поставщикам + запись в лист Позиции ─────────────────
+    // writeOrderItemsToSheet сам дедуплицирует по номеру заказа (overwrite=false
+    // по умолчанию), так что дублей при параллельных запусках с reprocessTodayOrders
+    // не будет — та функция явно исключает уже помеченные GO письма (-label:GO).
     if (orderExcelData.length > 0) {
       await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
         console.error(`[gmail] orderExcel error: ${e.message}`)
+      );
+      await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
+        console.error(`[gmail] orderSheet error: ${e.message}`)
       );
     }
 
@@ -591,4 +595,76 @@ async function reprocessTodayOrders() {
   }
 }
 
-module.exports = { processGmailOrders, reprocessTodayOrders };
+/**
+ * Разовый бэкфилл: перечитывает уже помеченные Transfer+GO письма за период
+ * (по умолчанию с 2026/07/20 — дата коммита e498a40, который отключил запись
+ * в лист «Позиции» для писем, распознавшихся с первого раза) и дописывает
+ * недостающие позиции. Excel-отчёты и лейблы не трогает — эти письма уже
+ * обработаны и разосланы в своё время, тут чинится только пробел в таблице.
+ * Безопасно перезапускать: writeOrderItemsToSheet(..., overwrite=false)
+ * пропускает номера заказов, которые уже есть в листе.
+ * Включается переменной окружения BACKFILL_POSITIONS=true (см. index.js).
+ */
+async function backfillPositions() {
+  try {
+    const cfg = await getConfig();
+    const LABEL_NAME = cfg.GMAIL_LABEL || 'Transfer';
+    const AFTER_DATE = process.env.BACKFILL_AFTER_DATE || '2026/07/20';
+
+    const auth  = await getAuthClient();
+    const gmail = getGmailClient(auth);
+
+    const query = `label:${LABEL_NAME} label:GO after:${AFTER_DATE}`;
+    console.log(`[backfill] Поиск: ${query}`);
+
+    const messageIds = [];
+    let pageToken;
+    do {
+      const res = await gmail.users.messages.list({
+        userId: 'me', q: query, maxResults: 100, pageToken,
+      });
+      messageIds.push(...(res.data.messages || []).map(m => m.id));
+      pageToken = res.data.nextPageToken;
+    } while (pageToken);
+
+    console.log(`[backfill] Найдено писем с лейблом GO: ${messageIds.length}`);
+    if (messageIds.length === 0) return;
+
+    const orderExcelData = [];
+
+    for (const id of messageIds) {
+      const res     = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+      const msg     = res.data;
+      const headers = msg.payload?.headers || [];
+      const subject = headers.find(h => h.name === 'Subject')?.value || '';
+
+      const htmlBody  = extractByMime(msg.payload, 'text/html');
+      const plainBody = extractByMime(msg.payload, 'text/plain');
+      const { object, orderNumber, orderDate } = parseSubject(subject);
+      const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
+      const total    = extractOrderTotal(htmlBody);
+
+      const items        = parseOrderItems(htmlBody);
+      const deliveryDate = parseDeliveryDate(htmlBody);
+
+      if (items.length > 0) {
+        orderExcelData.push({
+          supplier: supplier || '',
+          object:   object || subject,
+          orderNumber, orderDate, deliveryDate, items, total,
+        });
+      }
+    }
+
+    console.log(`[backfill] Писем с распознанными позициями: ${orderExcelData.length} из ${messageIds.length}`);
+    if (orderExcelData.length === 0) return;
+
+    await writeOrderItemsToSheet(orderExcelData, cfg);
+
+  } catch (err) {
+    console.error(`[backfillPositions] Ошибка: ${err.message}`);
+    if (err.stack) console.error(err.stack);
+  }
+}
+
+module.exports = { processGmailOrders, reprocessTodayOrders, backfillPositions };
