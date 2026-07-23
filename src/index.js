@@ -11,7 +11,7 @@
 require('dotenv').config();
 process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
 const cron = require('node-cron');
-const { processGmailOrders, reprocessTodayOrders }    = require('./gmail');
+const { processGmailOrders, reprocessTodayOrders, backfillPositions } = require('./gmail');
 const { sendOrdersToTelegram }                        = require('./sendOrders');
 const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus');
 const { startChannelBot, sendTodayOrders }            = require('./channelBot');
@@ -52,10 +52,16 @@ async function start() {
   console.log(`  Today orders   : ${cronBuy}`);
   console.log(`  Reprocess GO   : ${cronReprocess}`);
 
-  // 3. Первый запуск Gmail reader сразу
+  // 3. Разовый бэкфилл листа «Позиции» — включается вручную переменной
+  // окружения BACKFILL_POSITIONS=true, после того как отработает — можно убрать.
+  if (process.env.BACKFILL_POSITIONS === 'true') {
+    await run('Backfill Позиции', backfillPositions);
+  }
+
+  // 4. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
 
-  // 4. Cron-задачи
+  // 5. Cron-задачи
   cron.schedule('* * * * *',    () => run('Check status (update)', updateOrderStatus));
   cron.schedule(cronGmail,      () => run('Gmail reader',           processGmailOrders));
   cron.schedule(cronStatus,     () => run('Check status + notify',  updateOrderStatusAndNotify));
