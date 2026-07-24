@@ -425,6 +425,23 @@ async function processGmailOrders() {
     await ensureSheetExists(SHEET_NAME, HEADERS);
     await appendRowsToSheet(SHEET_NAME, newRows);
 
+    // ── Лейблим письма сразу после записи в "Отправлен" — до отправки в Telegram
+    // (Excel-отчёт, уведомления о минималке) и до записи в "Позиции". Если процесс
+    // упадёт/перезапустится дальше — письма уже помечены и не найдутся повторно
+    // поиском (-label:${LABEL_NAME}), то есть не будет дублирующей отправки xlsx
+    // в общий чат при следующем запуске. Риск сдвигается в другую сторону (письмо
+    // помечено, но Excel/Позиции не записались) — это восстанавливается вручную
+    // через backfillPositions() в index.js, а не требует чистки чата от дублей.
+    for (const id of processedIds) {
+      const addLabelIds = [labelId];
+      if (orderEmailIds.includes(id)) addLabelIds.push(goLabelId);
+      await gmail.users.messages.modify({
+        userId: 'me', id,
+        requestBody: { addLabelIds },
+      });
+    }
+    console.log(`Помечено писем лейблом "${LABEL_NAME}": ${processedIds.length}, лейблом "GO": ${orderEmailIds.length}`);
+
     // ── Обработка Минималки ──────────────────────────────────────────────────
     if (minimalkaRows.length > 0) {
       const MSHEET  = cfg.SHEET_MINIMALKA || 'Минималка';
@@ -480,16 +497,6 @@ async function processGmailOrders() {
         console.error(`[gmail] orderSheet error: ${e.message}`)
       );
     }
-
-    for (const id of processedIds) {
-      const addLabelIds = [labelId];
-      if (orderEmailIds.includes(id)) addLabelIds.push(goLabelId);
-      await gmail.users.messages.modify({
-        userId: 'me', id,
-        requestBody: { addLabelIds },
-      });
-    }
-    console.log(`Помечено писем лейблом "${LABEL_NAME}": ${processedIds.length}, лейблом "GO": ${orderEmailIds.length}`);
 
   } catch (err) {
     console.error(`[processGmailOrders] Ошибка: ${err.message}`);
@@ -572,15 +579,11 @@ async function reprocessTodayOrders() {
       return;
     }
 
-    await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
-      console.error(`[reprocess] orderExcel error: ${e.message}`)
-    );
-    // overwrite=true: удаляем старые строки этих заказов перед записью (чистый перезапуск)
-    await writeOrderItemsToSheet(orderExcelData, cfg, true).catch(e =>
-      console.error(`[reprocess] orderSheet error: ${e.message}`)
-    );
-
-    // Ставим лейбл GO на обработанные письма
+    // Лейблим GO сразу — до отправки в Telegram и записи в "Позиции" — по той же
+    // причине, что и в processGmailOrders(): если процесс упадёт/перезапустится
+    // между отправкой и лейблом, письмо уже помечено и не найдётся повторно
+    // этим же запросом (-label:GO), то есть не будет дублирующей отправки xlsx
+    // в общий чат при следующем запуске.
     for (const id of goIds) {
       await gmail.users.messages.modify({
         userId: 'me', id,
@@ -588,6 +591,14 @@ async function reprocessTodayOrders() {
       }).catch(e => console.error(`[reprocess] label GO error: ${e.message}`));
     }
     console.log(`[reprocess] GO поставлен на ${goIds.length} писем`);
+
+    await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
+      console.error(`[reprocess] orderExcel error: ${e.message}`)
+    );
+    // overwrite=true: удаляем старые строки этих заказов перед записью (чистый перезапуск)
+    await writeOrderItemsToSheet(orderExcelData, cfg, true).catch(e =>
+      console.error(`[reprocess] orderSheet error: ${e.message}`)
+    );
 
   } catch (err) {
     console.error(`[reprocessTodayOrders] Ошибка: ${err.message}`);
