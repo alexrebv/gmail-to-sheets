@@ -213,7 +213,7 @@ async function buildSupplierExcel(supplier, orders) {
     if (i >= 4) c.alignment = { horizontal: 'center', vertical: 'middle' };
   }
 
-  const now      = new Date().toISOString().slice(0, 10);
+  const now      = _todayKey();
   const safeName = supplier.replace(/[^а-яёА-ЯЁa-zA-Z0-9]/g, '_').substring(0, 28);
   const tmpPath  = path.join(os.tmpdir(), `order_${safeName}_${now}.xlsx`);
   await wb.xlsx.writeFile(tmpPath);
@@ -280,8 +280,15 @@ function logTgResponse(supplier, resp) {
 // При повторном поступлении новых объектов в тот же день — мержим и пересылаем.
 const _dayAccumulator = new Map();
 
+// Ключ дня в рабочем часовом поясе (по умолчанию Москва), а НЕ в UTC.
+// toISOString() всегда отдаёт UTC, игнорируя process.env.TZ, поэтому ночью
+// (00:00–03:00 МСК) он возвращал ещё вчерашнюю дату: накопитель за прошлый день
+// не сбрасывался, и ночной заказ считался «без новых объектов» — файл не уходил.
 function _todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: process.env.TIMEZONE || 'Europe/Moscow',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
 }
 
 /**
