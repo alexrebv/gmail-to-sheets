@@ -17,7 +17,7 @@ const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus
 const { startChannelBot, sendTodayOrders }            = require('./channelBot');
 const { getConfig }                                   = require('./config');
 
-const DEFAULT_CRON_GMAIL       = '*/15 * * * *';
+const DEFAULT_CRON_GMAIL       = '* * * * *';
 const DEFAULT_CRON_SEND_ORDERS = '0 8 * * *';
 const DEFAULT_CRON_STATUS      = '0 6,10,14,18,22 * * *';
 const DEFAULT_CRON_END_DAY     = '30 22 * * *';
@@ -87,7 +87,19 @@ async function runTodayOrders() {
   await sendTodayOrders(chatId, threadId, cfg);
 }
 
+// Задачи, которые сейчас выполняются. При минутном расписании очередной запуск
+// может прийти раньше, чем закончился предыдущий (Gmail + Sheets + Telegram
+// вполне укладываются в минуту не всегда) — накладывающиеся запуски приводили бы
+// к повторной обработке одних и тех же писем. Поэтому пропускаем тик, если
+// предыдущий запуск этой же задачи ещё идёт.
+const _running = new Set();
+
 async function run(label, fn) {
+  if (_running.has(label)) {
+    console.log(`[${ts()}] ⏭ ${label} — предыдущий запуск ещё идёт, пропускаем тик`);
+    return;
+  }
+  _running.add(label);
   console.log(`\n[${ts()}] ▶ ${label}`);
   try {
     await fn();
@@ -95,6 +107,8 @@ async function run(label, fn) {
   } catch (err) {
     console.error(`[${ts()}] ✗ ${label} — ошибка: ${err.message}`);
     if (err.stack) console.error(err.stack);
+  } finally {
+    _running.delete(label);
   }
 }
 
