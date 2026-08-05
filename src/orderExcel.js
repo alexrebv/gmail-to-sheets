@@ -315,14 +315,52 @@ function _accumulateOrders(supplier, newOrders) {
     .map(o => o.object);
 
   // Добавляем только реально новые объекты (дедупликация по object)
+  const addedOrders = [];
   for (const o of newOrders) {
     if (!existingObjects.has(o.object)) {
       acc.orders.push(o);
       existingObjects.add(o.object);
+      addedOrders.push(o);
     }
   }
 
-  return { allOrders: acc.orders, newObjects };
+  return { allOrders: acc.orders, newObjects, addedOrders };
+}
+
+// ── Устойчивость к перезапуску ────────────────────────────────────────────────
+// Накопитель выше живёт в памяти, поэтому при рестарте/редеплое состав бланка
+// терялся: следующий заказ уходил как «первая партия дня» — только с ним одним
+// и без пометки «Добавился объект». Ниже поднимаем состав бланка из служебного
+// листа (см. orderSheet.js) и дописываем в него новые заказы.
+// Всё best-effort: если таблица недоступна, работаем как раньше, по памяти.
+
+async function _restoreDayBlank(supplier, dayKey) {
+  const acc = _dayAccumulator.get(supplier);
+  if (acc && acc.date === dayKey && acc.orders.length > 0) return; // память актуальна
+
+  try {
+    const store = require('./orderSheet');
+    const nums = await store.loadBlankOrderNumbers(supplier, dayKey);
+    if (!nums || nums.size === 0) return;
+
+    const orders = await store.loadOrdersByNumbers(nums);
+    if (!orders.length) return;
+
+    _dayAccumulator.set(supplier, { orders, date: dayKey });
+    console.log(`[orderExcel] ${supplier}: состав бланка восстановлен (${orders.length} заказов)`);
+  } catch (e) {
+    console.error(`[orderExcel] Не удалось восстановить бланк для ${supplier}: ${e.message}`);
+  }
+}
+
+async function _persistDayBlank(supplier, dayKey, addedOrders) {
+  const nums = (addedOrders || []).map(o => o.orderNumber).filter(Boolean);
+  if (!nums.length) return;
+  try {
+    await require('./orderSheet').recordBlankOrderNumbers(supplier, dayKey, nums);
+  } catch (e) {
+    console.error(`[orderExcel] Не удалось сохранить состав бланка для ${supplier}: ${e.message}`);
+  }
 }
 
 /**
@@ -363,11 +401,16 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
 
   for (const [supplier, newOrders] of bySupplier) {
     try {
+      // Восстанавливаем состав бланка за день, если накопитель в памяти пуст
+      // или устарел (перезапуск/редеплой). Иначе бланк ушёл бы только с новым
+      // заказом и без пометки «Добавился объект».
+      await _restoreDayBlank(supplier, now);
+
       const isFirstBatch = !_dayAccumulator.has(supplier) ||
         _dayAccumulator.get(supplier).date !== now ||
         _dayAccumulator.get(supplier).orders.length === 0;
 
-      const { allOrders, newObjects } = _accumulateOrders(supplier, newOrders);
+      const { allOrders, newObjects, addedOrders } = _accumulateOrders(supplier, newOrders);
 
       if (!isFirstBatch && newObjects.length === 0) {
         console.log(`[orderExcel] ${supplier}: нет новых объектов, пропускаем`);
@@ -385,6 +428,9 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
       const resp = await sendDocument(token, chatId, threadId, filePath, caption);
       logTgResponse(supplier, resp);
       try { fs.unlinkSync(filePath); } catch {}
+
+      // Фиксируем состав бланка, чтобы он пережил перезапуск.
+      await _persistDayBlank(supplier, now, addedOrders);
     } catch (e) {
       console.error(`[orderExcel] Ошибка для ${supplier}: ${e.message}`);
     }

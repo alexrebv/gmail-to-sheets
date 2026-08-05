@@ -183,4 +183,105 @@ async function updateGoStatus(orderNumber, status, cfg) {
   console.log(`[orderSheet] Статус "${status}" для ${orderNumber} (${updates.length} строк)`);
 }
 
-module.exports = { writeOrderItemsToSheet, updateGoStatus };
+// ── Бланк дня: устойчивое к перезапуску состояние ────────────────────────────
+// Накопитель заказов за день в orderExcel.js живёт в памяти и теряется при
+// рестарте/редеплое: после этого бланк уходил только с новым заказом и без
+// пометки «Добавился объект». Поэтому состав бланка фиксируем в отдельном
+// служебном листе (день + поставщик + номер заказа), а сами позиции при
+// восстановлении дочитываем из «Позиции» по этим номерам.
+//
+// Лист «БланкиДня»: A День (YYYY-MM-DD) | B Поставщик | C Номер заказа
+
+const BLANK_SHEET = 'БланкиДня';
+const BLANK_HEADERS = ['День', 'Поставщик', 'Номер заказа'];
+
+/**
+ * Номера заказов, уже вошедшие в бланк этого поставщика за указанный день.
+ * @returns {Promise<Set<string>>}
+ */
+async function loadBlankOrderNumbers(supplier, dayKey) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  await ensureSheetExists(BLANK_SHEET, BLANK_HEADERS);
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${BLANK_SHEET}'!A2:C`,
+  }).catch(() => ({ data: { values: [] } }));
+
+  const out = new Set();
+  for (const r of (res.data.values || [])) {
+    if ((r[0] || '').toString().trim() !== dayKey) continue;
+    if ((r[1] || '').toString().trim() !== supplier) continue;
+    const num = (r[2] || '').toString().trim();
+    if (num) out.add(num);
+  }
+  return out;
+}
+
+/**
+ * Дописывает номера заказов в состав бланка дня.
+ */
+async function recordBlankOrderNumbers(supplier, dayKey, orderNumbers) {
+  const nums = [...new Set((orderNumbers || []).map(n => (n || '').toString().trim()).filter(Boolean))];
+  if (!nums.length) return;
+
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  await ensureSheetExists(BLANK_SHEET, BLANK_HEADERS);
+
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${BLANK_SHEET}'!A1`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: nums.map(n => [dayKey, supplier, n]) },
+  });
+}
+
+/**
+ * Восстанавливает заказы бланка из «Позиции» по номерам заказов.
+ * Возвращает тот же формат, что и парсер писем:
+ * [{supplier, object, orderNumber, orderDate, deliveryDate, items:[{desc,article,pack,qty}]}]
+ */
+async function loadOrdersByNumbers(orderNumbers) {
+  const nums = orderNumbers instanceof Set ? orderNumbers : new Set(orderNumbers || []);
+  if (nums.size === 0) return [];
+
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${SHEET_NAME}'!A2:J`,
+  }).catch(() => ({ data: { values: [] } }));
+
+  const byOrder = new Map();
+  for (const r of (res.data.values || [])) {
+    const num = (r[3] || '').toString().trim();
+    if (!num || !nums.has(num)) continue;
+    if (!byOrder.has(num)) {
+      byOrder.set(num, {
+        supplier:     (r[1] || '').toString().trim(),
+        object:       (r[2] || '').toString().trim(),
+        orderNumber:  num,
+        orderDate:    (r[4] || '').toString().trim(),
+        deliveryDate: (r[5] || '').toString().trim(),
+        items: [],
+      });
+    }
+    byOrder.get(num).items.push({
+      desc:    (r[6] || '').toString().trim(),
+      article: (r[7] || '').toString().trim(),
+      pack:    (r[8] || '').toString().trim(),
+      qty:     parseFloat((r[9] || '0').toString().replace(',', '.')) || 0,
+    });
+  }
+  return [...byOrder.values()];
+}
+
+module.exports = {
+  writeOrderItemsToSheet, updateGoStatus,
+  loadBlankOrderNumbers, recordBlankOrderNumbers, loadOrdersByNumbers,
+};
