@@ -341,9 +341,22 @@ async function _restoreDayBlank(supplier, dayKey) {
   try {
     const store = require('./orderSheet');
     const nums = await store.loadBlankOrderNumbers(supplier, dayKey);
-    if (!nums || nums.size === 0) return;
 
-    const orders = await store.loadOrdersByNumbers(nums);
+    let orders = [];
+    if (nums && nums.size > 0) {
+      orders = await store.loadOrdersByNumbers(nums);
+    }
+    // Маркеров за день нет (лист только появился, первая партия после деплоя,
+    // запись маркера не прошла) — поднимаем состав прямо из «Позиции» по дню.
+    if (!orders.length) {
+      orders = await store.loadOrdersForProcessingDay(supplier, dayKey);
+      if (orders.length) {
+        console.log(`[orderExcel] ${supplier}: состав бланка поднят из «Позиции» (${orders.length} заказов)`);
+        // Заодно фиксируем маркеры, чтобы дальше восстанавливаться дешевле.
+        await store.recordBlankOrderNumbers(supplier, dayKey, orders.map(o => o.orderNumber))
+          .catch(() => {});
+      }
+    }
     if (!orders.length) return;
 
     _dayAccumulator.set(supplier, { orders, date: dayKey });

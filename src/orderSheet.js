@@ -281,7 +281,78 @@ async function loadOrdersByNumbers(orderNumbers) {
   return [...byOrder.values()];
 }
 
+// Дата обработки (колонка A) в «Позиции» может прийти как serial-число Sheets
+// или как строка — приводим к ключу YYYY-MM-DD. Возвращает '' если не разобрали.
+function cellToDayKey(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') {
+    // Serial Sheets: дни с 1899-12-30. Берём целую часть — это отображаемая дата.
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000);
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${m}-${day}`;
+  }
+  const s = v.toString().trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{2})\.(\d{2})\.(\d{4})/.exec(s);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return '';
+}
+
+/**
+ * Запасной способ восстановить состав бланка: все заказы поставщика,
+ * обработанные в указанный день, прямо из «Позиции». Нужен, когда листа-маркера
+ * ещё нет или он пуст (например, первая партия после деплоя).
+ */
+async function loadOrdersForProcessingDay(supplier, dayKey) {
+  const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+  const auth   = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${SHEET_NAME}'!A2:J`,
+    valueRenderOption: 'UNFORMATTED_VALUE',
+  }).catch(() => ({ data: { values: [] } }));
+
+  const byOrder = new Map();
+  for (const r of (res.data.values || [])) {
+    if ((r[1] || '').toString().trim() !== supplier) continue;
+    if (cellToDayKey(r[0]) !== dayKey) continue;
+    const num = (r[3] || '').toString().trim();
+    if (!num) continue;
+    if (!byOrder.has(num)) {
+      byOrder.set(num, {
+        supplier,
+        object:       (r[2] || '').toString().trim(),
+        orderNumber:  num,
+        orderDate:    (r[4] || '').toString().trim(),
+        deliveryDate: (r[5] || '').toString().trim(),
+        items: [],
+      });
+    }
+    byOrder.get(num).items.push({
+      desc:    (r[6] || '').toString().trim(),
+      article: (r[7] || '').toString().trim(),
+      pack:    (r[8] || '').toString().trim(),
+      qty:     parseFloat((r[9] || '0').toString().replace(',', '.')) || 0,
+    });
+  }
+  // Накопитель в orderExcel держит один заказ на объект (повторный заказ по уже
+  // присланному объекту в бланк не добавляется) — при восстановлении соблюдаем
+  // ту же логику, иначе количества по объекту сложились бы дважды.
+  const seenObjects = new Set();
+  const out = [];
+  for (const o of byOrder.values()) {
+    if (seenObjects.has(o.object)) continue;
+    seenObjects.add(o.object);
+    out.push(o);
+  }
+  return out;
+}
+
 module.exports = {
   writeOrderItemsToSheet, updateGoStatus,
   loadBlankOrderNumbers, recordBlankOrderNumbers, loadOrdersByNumbers,
+  loadOrdersForProcessingDay, cellToDayKey,
 };
