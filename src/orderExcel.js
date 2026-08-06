@@ -215,7 +215,13 @@ async function buildSupplierExcel(supplier, orders) {
 
   const now      = _todayKey();
   const safeName = supplier.replace(/[^а-яёА-ЯЁa-zA-Z0-9]/g, '_').substring(0, 28);
-  const tmpPath  = path.join(os.tmpdir(), `order_${safeName}_${now}.xlsx`);
+  // Каждый вызов пишет в СВОЙ временный каталог. Раньше путь был один и тот же
+  // для поставщика в течение дня, а sendOrderExcelReports вызывают две разные
+  // cron-задачи (Gmail reader и Reprocess today GO) — при совпадении по времени
+  // одна перезаписывала файл, пока другая его читала, и в Telegram уходил
+  // битый xlsx. Имя файла при этом прежнее — его видит получатель.
+  const tmpDir   = fs.mkdtempSync(path.join(os.tmpdir(), 'order-'));
+  const tmpPath  = path.join(tmpDir, `order_${safeName}_${now}.xlsx`);
   await wb.xlsx.writeFile(tmpPath);
   return tmpPath;
 }
@@ -381,7 +387,17 @@ async function _persistDayBlank(supplier, dayKey, addedOrders) {
  * @param {Array}  parsedOrders — [{supplier, object, orderNumber, orderDate, deliveryDate, items, total}]
  * @param {object} cfg
  */
+// Отправку сериализуем: функцию дёргают две независимые cron-задачи
+// (Gmail reader и Reprocess today GO), а она разделяет накопитель заказов.
+// Параллельные вызовы приводили бы к двойной отправке и гонкам по состоянию.
+let _sendChain = Promise.resolve();
 async function sendOrderExcelReports(parsedOrders, cfg) {
+  const task = _sendChain.then(() => _sendOrderExcelReports(parsedOrders, cfg));
+  _sendChain = task.catch(() => {});
+  return task;
+}
+
+async function _sendOrderExcelReports(parsedOrders, cfg) {
   console.log(`[orderExcel] called: ${parsedOrders.length} orders, ENABLE_ORDER_EXCEL=${cfg.ENABLE_ORDER_EXCEL}`);
 
   // Флаг быстрого отключения
@@ -440,7 +456,7 @@ async function sendOrderExcelReports(parsedOrders, cfg) {
 
       const resp = await sendDocument(token, chatId, threadId, filePath, caption);
       logTgResponse(supplier, resp);
-      try { fs.unlinkSync(filePath); } catch {}
+      try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
 
       // Фиксируем состав бланка, чтобы он пережил перезапуск.
       await _persistDayBlank(supplier, now, addedOrders);
