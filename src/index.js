@@ -59,9 +59,6 @@ async function start() {
     await run('Backfill Позиции', backfillPositions);
   }
 
-  // Схема Postgres (если задан DATABASE_URL) — этап переезда с Таблицы.
-  await db.init();
-
   // 4. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
 
@@ -72,6 +69,12 @@ async function start() {
   cron.schedule(cronEndDay,     () => run('End of day report',       runEndDay));
   cron.schedule(cronBuy,        () => run('Today orders → Telegram', runTodayOrders));
   cron.schedule(cronReprocess,  () => run('Reprocess today GO',      reprocessTodayOrders));
+
+  // Схема Postgres — ПОСЛЕ регистрации расписания и без await: если база
+  // недоступна и подключение зависнет, это не должно помешать cron-задачам
+  // (иначе молча пропадают отчёты по накладным). Схема всё равно готовится
+  // лениво при первой записи в базу.
+  db.init().catch(e => console.error('[db] init:', e.message));
 }
 
 async function runEndDay() {
@@ -96,14 +99,26 @@ async function runTodayOrders() {
 // вполне укладываются в минуту не всегда) — накладывающиеся запуски приводили бы
 // к повторной обработке одних и тех же писем. Поэтому пропускаем тик, если
 // предыдущий запуск этой же задачи ещё идёт.
-const _running = new Set();
+// label -> { token, startedAt }. Токен нужен, чтобы «зависший» прогон,
+// завершившись позже, не снял отметку у актуального.
+const _running = new Map();
+// Если задача идёт дольше этого времени, считаем её застрявшей и запускаем
+// заново: иначе один подвисший прогон навсегда глушил бы расписание.
+const STALE_MS = 30 * 60 * 1000;
+let _runToken = 0;
 
 async function run(label, fn) {
-  if (_running.has(label)) {
-    console.log(`[${ts()}] ⏭ ${label} — предыдущий запуск ещё идёт, пропускаем тик`);
-    return;
+  const cur = _running.get(label);
+  if (cur) {
+    const age = Date.now() - cur.startedAt;
+    if (age < STALE_MS) {
+      console.log(`[${ts()}] ⏭ ${label} — предыдущий запуск ещё идёт, пропускаем тик`);
+      return;
+    }
+    console.warn(`[${ts()}] ⚠ ${label} — предыдущий запуск идёт ${Math.round(age / 60000)} мин, запускаю заново`);
   }
-  _running.add(label);
+  const token = ++_runToken;
+  _running.set(label, { token, startedAt: Date.now() });
   console.log(`\n[${ts()}] ▶ ${label}`);
   try {
     await fn();
@@ -112,7 +127,8 @@ async function run(label, fn) {
     console.error(`[${ts()}] ✗ ${label} — ошибка: ${err.message}`);
     if (err.stack) console.error(err.stack);
   } finally {
-    _running.delete(label);
+    // Снимаем отметку только если она наша (иначе затрём актуальный прогон).
+    if (_running.get(label)?.token === token) _running.delete(label);
   }
 }
 
