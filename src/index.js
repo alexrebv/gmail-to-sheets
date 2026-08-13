@@ -11,6 +11,7 @@
 require('dotenv').config();
 process.env.TZ = process.env.TIMEZONE || 'Europe/Moscow';
 const cron = require('node-cron');
+const db = require('./db');
 const { processGmailOrders, reprocessTodayOrders, backfillPositions } = require('./gmail');
 const { sendOrdersToTelegram }                        = require('./sendOrders');
 const { updateOrderStatus, updateOrderStatusAndNotify } = require('./checkStatus');
@@ -57,6 +58,9 @@ async function start() {
   if (process.env.BACKFILL_POSITIONS === 'true') {
     await run('Backfill Позиции', backfillPositions);
   }
+
+  // Схема Postgres (если задан DATABASE_URL) — этап переезда с Таблицы.
+  await db.init();
 
   // 4. Первый запуск Gmail reader сразу
   run('Gmail reader', processGmailOrders);
