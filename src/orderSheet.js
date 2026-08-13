@@ -18,6 +18,7 @@
 
 const { getAuthClient, getSheetsClient } = require('./auth');
 const { ensureSheetExists } = require('./sheets');
+const db = require('./db');
 
 const SHEET_NAME = 'Позиции';
 const HEADERS = [
@@ -150,6 +151,9 @@ async function writeOrderItemsToSheet(orders, cfg, overwrite = false) {
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: rows },
   });
+
+  // Дублируем в Postgres (этап переезда с Таблицы). Ошибки базы гасятся внутри.
+  await db.mirrorPositions(rows);
 
   console.log(`[orderSheet] Записано ${rows.length} позиций из ${orders.length} заказов`);
 }
