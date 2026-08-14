@@ -132,8 +132,14 @@ async function run(label, fn) {
   }
 }
 
+// Время в логах — в рабочем часовом поясе, том же, по которому срабатывает
+// cron. toISOString() всегда отдаёт UTC, из-за чего строка вида
+// «[2026-08-14 03:00:00] Check status» соответствовала запуску в 06:00 МСК и
+// выглядела как сбитое время.
 function ts() {
-  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+  return new Date().toLocaleString('sv-SE', {
+    timeZone: process.env.TIMEZONE || 'Europe/Moscow',
+  });
 }
 
 start();
