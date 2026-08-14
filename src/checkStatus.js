@@ -160,7 +160,15 @@ async function updateOrderStatus() {
  * Вызывается по расписанию CRON_STATUS.
  */
 async function updateOrderStatusAndNotify() {
-  await updateOrderStatus();
+  // Сверка статусов и отправка отчётов — независимые задачи. Раньше сбой
+  // сверки (например, переименованный лист «Вычерк») ронял всю функцию до
+  // отправки, и отчёты по накладным молча не приходили. Теперь ошибка сверки
+  // громко пишется в лог, но отчёты уходят в любом случае.
+  try {
+    await updateOrderStatus();
+  } catch (e) {
+    console.error('[checkStatus] Сверка статусов не удалась, отчёты отправляю всё равно:', e.message);
+  }
 
   const cfg      = await getConfig();
   const CHAT_ID  = cfg.TELEGRAM_CHAT_ID;
