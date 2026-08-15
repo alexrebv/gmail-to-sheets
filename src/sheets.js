@@ -30,6 +30,31 @@ async function ensureSheetExists(sheetName, headers) {
  * Дописывает строки в лист, пропуская дубли по колонке C (Номер заказа).
  * Перед записью читает все существующие номера и фильтрует новые.
  */
+// Расширяет сетку листа, если запись выйдет за её пределы.
+// Пишем через values.update по вычисленной строке, а он, в отличие от append,
+// сам сетку НЕ наращивает: когда лист упирался в свой размер, обработка писем
+// падала с «Range ('Отправлен'!A15437) exceeds grid limits».
+async function ensureGridCapacity(sheets, sheetName, neededLastRow) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+  const sheet = (meta.data.sheets || []).find(sh => sh.properties.title === sheetName);
+  if (!sheet) return;
+
+  const rowCount = sheet.properties.gridProperties?.rowCount ?? 0;
+  if (neededLastRow <= rowCount) return;
+
+  // Добавляем с запасом, чтобы не дёргать API на каждой записи.
+  const extra = Math.max(neededLastRow - rowCount, 0) + 5000;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [{
+        appendDimension: { sheetId: sheet.properties.sheetId, dimension: 'ROWS', length: extra },
+      }],
+    },
+  });
+  console.log(`[sheets] "${sheetName}": сетка расширена на ${extra} строк (было ${rowCount})`);
+}
+
 async function appendRowsToSheet(sheetName, rows) {
   if (!rows.length) return;
   if (!SPREADSHEET_ID) throw new Error('SPREADSHEET_ID не задан в .env');
@@ -94,6 +119,8 @@ async function appendRowsToSheet(sheetName, rows) {
       return cell ?? '';
     })
   );
+
+  await ensureGridCapacity(sheets, sheetName, startRow + formattedRows.length - 1);
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
