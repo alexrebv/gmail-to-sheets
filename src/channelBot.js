@@ -650,14 +650,23 @@ async function sendPriceListReport(chatId, threadId, who, cfg) {
     // sendMessage шлёт с parse_mode Markdown - размечаем звёздочками.
     const lines = [
       '*Прайс для полного бланка*',
-      `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (PRICELIST\\_SPREADSHEET\\_ID)'}`,
-      `Лист: ${d.sheet}`,
+      `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (задана отдельно)'}`,
+      `Лист: ${d.usedSheet || d.sheet}${d.usedSheet && d.usedSheet !== d.sheet ? ` (искали «${d.sheet}», взяли похожий)` : ''}`,
       `Строк в прайсе: *${d.rows}*`,
-      `Полный бланк положен: ${wanted.join(', ') || '—'}`,
+      // В настройках пишут кусок названия - так задумано, поэтому и говорим
+      // «кто содержит», а не «кто равен».
+      `Полный бланк положен тем, в чьём названии есть: ${wanted.join(', ') || '—'}`,
     ];
     if (d.error) lines.push(`\n❌ Ошибка чтения: ${d.error}`);
+    // Листы книги - главная подсказка, когда заданного листа нет.
+    if (d.titles.length) {
+      lines.push(`\nЛисты в этой таблице (${d.titles.length}):`);
+      lines.push(d.titles.slice(0, 25).map(x => '• ' + x).join('\n'));
+      if (d.titles.length > 25) lines.push(`…и ещё ${d.titles.length - 25}`);
+    }
     if (target) {
-      lines.push(`\nПоставщик «${target}»: позиций в прайсе *${d.mine}*`);
+      lines.push(`\nИщем «${target}» — нашлось позиций: *${d.mine}*`);
+      if (d.matched.length) lines.push(`В прайсе он записан как: ${d.matched.join(', ')}`);
       const why = pricelist.whyEmpty(d, target);
       if (why) lines.push(`❌ ${why}`);
       else lines.push('✅ Бланк будет собран по прайсу целиком');
