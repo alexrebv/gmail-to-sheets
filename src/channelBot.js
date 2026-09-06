@@ -508,6 +508,16 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
+      // /pricelist [поставщик] — где ищем прайс и что там видно.
+      // Полный бланк зависит от трёх настроек сразу, и когда он не собирается,
+      // без этой команды причину пришлось бы искать в логах Railway.
+      if (text === '/pricelist' || text.startsWith('/pricelist ')) {
+        const who = text.replace(/^\/pricelist\s*/i, '').trim();
+        await sendTyping(cfg, chatId, replyThreadId);
+        await sendPriceListReport(chatId, replyThreadId, who, cfg);
+        return;
+      }
+
       // /errors — Excel с ошибками регистрации
       if (text === '/errors') {
         console.log(`[channelBot] Команда /errors от ${chatId} thread:${replyThreadId}`);
@@ -625,6 +635,43 @@ async function registerWebhook(token, webhookUrl) {
     req.on('error', reject);
     req.write(body); req.end();
   });
+}
+
+// Отчёт по прайсу: куда смотрим, что нашли, кому положен полный бланк.
+async function sendPriceListReport(chatId, threadId, who, cfg) {
+  const token = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
+  const pricelist = require('./pricelist');
+  try {
+    pricelist.clearCache();          // команду зовут, чтобы увидеть свежее
+    const wanted = pricelist.fullBlankSuppliers(cfg);
+    const target = who || wanted[0] || '';
+    const d = await pricelist.diagnose(target, cfg);
+
+    // sendMessage шлёт с parse_mode Markdown - размечаем звёздочками.
+    const lines = [
+      '*Прайс для полного бланка*',
+      `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (PRICELIST\\_SPREADSHEET\\_ID)'}`,
+      `Лист: ${d.sheet}`,
+      `Строк в прайсе: *${d.rows}*`,
+      `Полный бланк положен: ${wanted.join(', ') || '—'}`,
+    ];
+    if (d.error) lines.push(`\n❌ Ошибка чтения: ${d.error}`);
+    if (target) {
+      lines.push(`\nПоставщик «${target}»: позиций в прайсе *${d.mine}*`);
+      const why = pricelist.whyEmpty(d, target);
+      if (why) lines.push(`❌ ${why}`);
+      else lines.push('✅ Бланк будет собран по прайсу целиком');
+    }
+    if (d.suppliers.length) {
+      lines.push(`\nПоставщики в прайсе (${d.suppliers.length}):`);
+      lines.push(d.suppliers.slice(0, 20).map(x => '• ' + x).join('\n'));
+      if (d.suppliers.length > 20) lines.push(`…и ещё ${d.suppliers.length - 20}`);
+    }
+    await sendMessage(token, chatId, lines.join('\n'), threadId, 0);
+  } catch (e) {
+    console.error('[channelBot] /pricelist:', e.message);
+    await sendMessage(token, chatId, `Не удалось проверить прайс: ${e.message}`, threadId, 0);
+  }
 }
 
 async function startChannelBot() {
