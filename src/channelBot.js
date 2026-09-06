@@ -508,13 +508,13 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // /pricelist [поставщик] — где ищем прайс и что там видно.
+      // /pricelist [поставщик | ID таблицы] — где ищем прайс и что там видно.
       // Полный бланк зависит от трёх настроек сразу, и когда он не собирается,
       // без этой команды причину пришлось бы искать в логах Railway.
       if (text === '/pricelist' || text.startsWith('/pricelist ')) {
-        const who = text.replace(/^\/pricelist\s*/i, '').trim();
+        const arg = text.replace(/^\/pricelist\s*/i, '').trim();
         await sendTyping(cfg, chatId, replyThreadId);
-        await sendPriceListReport(chatId, replyThreadId, who, cfg);
+        await sendPriceListReport(chatId, replyThreadId, arg, cfg);
         return;
       }
 
@@ -637,20 +637,33 @@ async function registerWebhook(token, webhookUrl) {
   });
 }
 
+// ID таблицы в ссылке Google - длинная строка без пробелов. Так отличаем
+// «/pricelist 164SKr9…» (проверь вот эту таблицу) от «/pricelist Булки ПРО».
+const SHEET_ID_RE = /^[A-Za-z0-9_-]{30,}$/;
+
 // Отчёт по прайсу: куда смотрим, что нашли, кому положен полный бланк.
-async function sendPriceListReport(chatId, threadId, who, cfg) {
+// Аргументом можно передать ID таблицы - тогда проверяем её, не трогая
+// настройки: удобно убедиться в доступе до того, как что-то прописывать.
+async function sendPriceListReport(chatId, threadId, arg, cfg) {
   const token = cfg.TELEGRAM_TOKEN || process.env.TELEGRAM_TOKEN;
   const pricelist = require('./pricelist');
   try {
+    // Настройки кэшируются на пять минут: если строку в «Настройки» только что
+    // дописали, без сброса команда показала бы старое.
+    try { require('./config').clearConfigCache(); } catch {}
     pricelist.clearCache();          // команду зовут, чтобы увидеть свежее
-    const wanted = pricelist.fullBlankSuppliers(cfg);
-    const target = who || wanted[0] || '';
-    const d = await pricelist.diagnose(target, cfg);
+
+    const tryId = SHEET_ID_RE.test(arg) ? arg : '';
+    const use = tryId ? { ...cfg, PRICELIST_SPREADSHEET_ID: tryId } : cfg;
+    const wanted = pricelist.fullBlankSuppliers(use);
+    const target = tryId ? (wanted[0] || '') : (arg || wanted[0] || '');
+    const d = await pricelist.diagnose(target, use);
 
     // sendMessage шлёт с parse_mode Markdown - размечаем звёздочками.
     const lines = [
       '*Прайс для полного бланка*',
-      `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (задана отдельно)'}`,
+      tryId ? `Проверяю таблицу из команды: ${tryId.slice(0, 12)}…`
+            : `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (задана отдельно)'}`,
       `Лист: ${d.usedSheet || d.sheet}${d.usedSheet && d.usedSheet !== d.sheet ? ` (искали «${d.sheet}», взяли похожий)` : ''}`,
       `Строк в прайсе: *${d.rows}*`,
       // В настройках пишут кусок названия - так задумано, поэтому и говорим
@@ -670,6 +683,14 @@ async function sendPriceListReport(chatId, threadId, who, cfg) {
       const why = pricelist.whyEmpty(d, target);
       if (why) lines.push(`❌ ${why}`);
       else lines.push('✅ Бланк будет собран по прайсу целиком');
+      // Проверяли чужую таблицу и всё сошлось - подсказываем, что закрепить.
+      if (tryId && !why) {
+        lines.push(`\nЧтобы закрепить, добавьте на лист «Настройки»:`);
+        lines.push('`PRICELIST_SPREADSHEET_ID`  →  `' + tryId + '`');
+        if (d.usedSheet && d.usedSheet !== 'PriceList') {
+          lines.push('`SHEET_PRICELIST`  →  `' + d.usedSheet + '`');
+        }
+      }
     }
     if (d.suppliers.length) {
       lines.push(`\nПоставщики в прайсе (${d.suppliers.length}):`);
