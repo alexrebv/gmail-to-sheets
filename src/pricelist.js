@@ -64,14 +64,22 @@ function needsFullBlank(supplier, cfg) {
   });
 }
 
+// Где искать прайс - одним местом, чтобы диагностика и чтение не разошлись.
+function priceListSource(cfg) {
+  return {
+    spreadsheetId: (cfg && cfg.PRICELIST_SPREADSHEET_ID) || process.env.SPREADSHEET_ID || '',
+    sheet: (cfg && cfg.SHEET_PRICELIST) || 'PriceList',
+    ownId: !(cfg && cfg.PRICELIST_SPREADSHEET_ID),
+  };
+}
+
 /** Весь прайс одним куском: [{ supplier, article, desc, pack }]. */
 async function loadPriceList(cfg) {
   const now = Date.now();
   if (_cache && now - _cacheTime < CACHE_TTL_MS) return _cache;
 
-  const spreadsheetId = (cfg && cfg.PRICELIST_SPREADSHEET_ID) || process.env.SPREADSHEET_ID;
+  const { spreadsheetId, sheet } = priceListSource(cfg);
   if (!spreadsheetId) return [];
-  const sheet = (cfg && cfg.SHEET_PRICELIST) || 'PriceList';
 
   const auth = await getAuthClient();
   const sheets = getSheetsClient(auth);
@@ -127,6 +135,41 @@ async function catalogFor(supplier, cfg) {
   return out;
 }
 
+/**
+ * Что видно в прайсе: куда смотрим, сколько строк, какие поставщики.
+ * Нужен для команды /pricelist и для подписи к бланку, когда прайс не сошёлся:
+ * иначе полный бланк молча превращается в обычный, и причину не найти.
+ */
+async function diagnose(supplier, cfg) {
+  const src = priceListSource(cfg);
+  const out = { ...src, error: null, rows: 0, suppliers: [], mine: 0, wanted: fullBlankSuppliers(cfg) };
+  if (!src.spreadsheetId) { out.error = 'Не задан ни PRICELIST_SPREADSHEET_ID, ни SPREADSHEET_ID'; return out; }
+  let all;
+  try {
+    all = await loadPriceList(cfg);
+  } catch (e) {
+    out.error = e.message;
+    return out;
+  }
+  out.rows = all.length;
+  out.suppliers = [...new Set(all.map(r => r.supplier))].sort((a, b) => a.localeCompare(b, 'ru'));
+  if (supplier) out.mine = (await catalogFor(supplier, cfg)).length;
+  return out;
+}
+
+// Человеческим языком: что не так с прайсом. null - всё в порядке.
+function whyEmpty(d, supplier) {
+  const where = `лист «${d.sheet}» ${d.ownId ? 'основной таблицы' : 'таблицы ' + d.spreadsheetId.slice(0, 8) + '…'}`;
+  if (d.error) return `прайс не прочитался (${where}): ${d.error}`;
+  if (!d.rows) return `в прайсе нет строк (${where}) - проверьте имя листа и PRICELIST_SPREADSHEET_ID`;
+  if (!d.mine) {
+    const list = d.suppliers.slice(0, 8).join(', ');
+    return `в прайсе нет позиций поставщика «${supplier}» (${where}). Есть: ${list}${d.suppliers.length > 8 ? ' и ещё ' + (d.suppliers.length - 8) : ''}`;
+  }
+  return null;
+}
+
 function clearCache() { _cache = null; _cacheTime = 0; }
 
-module.exports = { catalogFor, loadPriceList, needsFullBlank, fullBlankSuppliers, supKey, artKey, clearCache };
+module.exports = { catalogFor, loadPriceList, needsFullBlank, fullBlankSuppliers,
+  priceListSource, diagnose, whyEmpty, supKey, artKey, clearCache };

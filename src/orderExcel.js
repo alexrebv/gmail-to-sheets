@@ -480,12 +480,16 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
 
       // Полный бланк - только тем поставщикам, кто в FULL_BLANK_SUPPLIERS.
       // Прайс не прочитался - шлём как раньше, по заказанному: лучше бланк без
-      // пустых строк, чем несделанная отправка.
+      // пустых строк, чем несделанная отправка. Но причину пишем в подпись:
+      // иначе полный бланк молча превращается в обычный, и не понять, почему.
       let catalog = null;
+      let priceNote = '';
       if (pricelist.needsFullBlank(supplier, cfg)) {
         catalog = await pricelist.catalogFor(supplier, cfg);
         if (!catalog.length) {
-          console.error(`[orderExcel] ${supplier}: полный бланк заказан, но в прайсе позиций не нашлось`);
+          const d = await pricelist.diagnose(supplier, cfg);
+          priceNote = pricelist.whyEmpty(d, supplier) || 'прайс пуст';
+          console.error(`[orderExcel] ${supplier}: полный бланк не собран - ${priceNote}`);
           catalog = null;
         }
       }
@@ -494,9 +498,11 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
       const totalItems = allOrders.reduce((s, o) => s + o.items.length, 0);
 
       let caption = `${supplier}\nЗаказов: ${allOrders.length} | Позиций: ${totalItems}\n${now}`;
+      if (catalog) caption += `\nБланк полный: позиций в прайсе ${catalog.length}`;
       if (!isFirstBatch && newObjects.length > 0) {
         caption += `\n⚠️ Добавился объект: ${newObjects.join(', ')}`;
       }
+      if (priceNote) caption += `\n⚠️ Полный бланк не собран: ${priceNote}`;
 
       const resp = await sendDocument(token, chatId, threadId, filePath, caption);
       logTgResponse(supplier, resp);
