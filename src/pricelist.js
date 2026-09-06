@@ -22,6 +22,7 @@ const { getAuthClient, getSheetsClient } = require('./auth');
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let _cache = null;
 let _cacheTime = 0;
+let _usedSheet = null;   // какой лист прочитали на самом деле
 
 // Латинские и русские двойники: «ООО» пишут и теми, и другими буквами, а
 // глазом это не различить. Сводим к одному написанию, иначе поставщик из
@@ -55,13 +56,19 @@ function fullBlankSuppliers(cfg) {
 // В настройках пишут «Булки ПРО», а в письме приходит «ООО «БУЛКИ  ПРО»» -
 // с формой собственности и кавычками. Поэтому сверяем вхождением, а не буква
 // в букву; короткие обрывки («ооо») отбрасываем, чтобы не поймать всех подряд.
+// Один и тот же поставщик, записанный по-разному. Сверяем вхождением:
+// «Булки ПРО» в настройках и «ООО «БУЛКИ  ПРО»» в письме - одно и то же.
+function sameSupplier(a, b) {
+  const x = supKey(a), y = supKey(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  // Короткие обрывки («ооо») не считаем совпадением: так можно поймать всех.
+  return Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x));
+}
+
 function needsFullBlank(supplier, cfg) {
-  const want = supKey(supplier);
-  if (!want) return false;
-  return fullBlankSuppliers(cfg).some(s => {
-    const k = supKey(s);
-    return k.length >= 4 && (want === k || want.includes(k) || k.includes(want));
-  });
+  if (!supKey(supplier)) return false;
+  return fullBlankSuppliers(cfg).some(s => sameSupplier(supplier, s));
 }
 
 // Где искать прайс - одним местом, чтобы диагностика и чтение не разошлись.
@@ -73,16 +80,42 @@ function priceListSource(cfg) {
   };
 }
 
+/** Названия листов книги - чтобы сказать, где искать, если заданного нет. */
+async function sheetTitles(spreadsheetId) {
+  const auth = await getAuthClient();
+  const sheets = getSheetsClient(auth);
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties.title',
+  });
+  return (res.data.sheets || []).map(x => x.properties && x.properties.title).filter(Boolean);
+}
+
+// Лист с прайсом, если имя не задано и «PriceList» в книге нет. Ищем по
+// названию: «Прайс», «Прайс-лист», «PriceList», «Цены».
+const PRICE_SHEET = /^\s*(прайс|price\s*list|pricelist|цены)/i;
+
 /** Весь прайс одним куском: [{ supplier, article, desc, pack }]. */
 async function loadPriceList(cfg) {
   const now = Date.now();
   if (_cache && now - _cacheTime < CACHE_TTL_MS) return _cache;
 
-  const { spreadsheetId, sheet } = priceListSource(cfg);
+  const { spreadsheetId, sheet: wanted } = priceListSource(cfg);
   if (!spreadsheetId) return [];
 
   const auth = await getAuthClient();
   const sheets = getSheetsClient(auth);
+
+  // Заданного листа в книге может не быть - тогда Google отвечает «Unable to
+  // parse range», и по этой строке не понять, что делать. Смотрим, какие листы
+  // есть, и берём похожий на прайс; если и такого нет - говорим прямо.
+  const titles = await sheetTitles(spreadsheetId);
+  let sheet = titles.includes(wanted) ? wanted : titles.find(t => PRICE_SHEET.test(t));
+  if (!sheet) {
+    throw new Error(`листа «${wanted}» в книге нет. Листы: ${titles.join(', ') || 'книга пуста'}`);
+  }
+  _usedSheet = sheet;
+
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: `'${sheet}'!A2:F5000`,
@@ -118,15 +151,10 @@ async function catalogFor(supplier, cfg) {
     console.error(`[pricelist] Не удалось прочитать прайс: ${e.message}`);
     return [];
   }
-  const want = supKey(supplier);
-  const same = a => {
-    const k = supKey(a);
-    return k.length >= 4 && (k === want || k.includes(want) || want.includes(k));
-  };
   const seen = new Set();
   const out = [];
   for (const r of all) {
-    if (!same(r.supplier)) continue;
+    if (!sameSupplier(r.supplier, supplier)) continue;
     const key = artKey(r.article) || r.desc.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -142,8 +170,11 @@ async function catalogFor(supplier, cfg) {
  */
 async function diagnose(supplier, cfg) {
   const src = priceListSource(cfg);
-  const out = { ...src, error: null, rows: 0, suppliers: [], mine: 0, wanted: fullBlankSuppliers(cfg) };
+  const out = { ...src, usedSheet: null, titles: [], error: null,
+                rows: 0, suppliers: [], matched: [], mine: 0, wanted: fullBlankSuppliers(cfg) };
   if (!src.spreadsheetId) { out.error = 'Не задан ни PRICELIST_SPREADSHEET_ID, ни SPREADSHEET_ID'; return out; }
+  try { out.titles = await sheetTitles(src.spreadsheetId); } catch (e) { out.error = e.message; }
+
   let all;
   try {
     all = await loadPriceList(cfg);
@@ -151,17 +182,24 @@ async function diagnose(supplier, cfg) {
     out.error = e.message;
     return out;
   }
+  out.usedSheet = _usedSheet;
   out.rows = all.length;
   out.suppliers = [...new Set(all.map(r => r.supplier))].sort((a, b) => a.localeCompare(b, 'ru'));
-  if (supplier) out.mine = (await catalogFor(supplier, cfg)).length;
+  if (supplier) {
+    // Как поставщик записан в самом прайсе: в настройках пишут кусок названия,
+    // а в бланк идёт то, что стоит в прайсе.
+    out.matched = out.suppliers.filter(x => sameSupplier(x, supplier));
+    out.mine = (await catalogFor(supplier, cfg)).length;
+  }
   return out;
 }
 
 // Человеческим языком: что не так с прайсом. null - всё в порядке.
 function whyEmpty(d, supplier) {
-  const where = `лист «${d.sheet}» ${d.ownId ? 'основной таблицы' : 'таблицы ' + d.spreadsheetId.slice(0, 8) + '…'}`;
-  if (d.error) return `прайс не прочитался (${where}): ${d.error}`;
-  if (!d.rows) return `в прайсе нет строк (${where}) - проверьте имя листа и PRICELIST_SPREADSHEET_ID`;
+  const book = d.ownId ? 'основной таблицы' : 'таблицы ' + String(d.spreadsheetId).slice(0, 8) + '…';
+  if (d.error) return `прайс не прочитался в ${book}: ${d.error}`;
+  const where = `лист «${d.usedSheet || d.sheet}» ${book}`;
+  if (!d.rows) return `в прайсе нет строк (${where}) - проверьте, что в колонке A поставщик, в D товар у поставщика`;
   if (!d.mine) {
     const list = d.suppliers.slice(0, 8).join(', ');
     return `в прайсе нет позиций поставщика «${supplier}» (${where}). Есть: ${list}${d.suppliers.length > 8 ? ' и ещё ' + (d.suppliers.length - 8) : ''}`;
@@ -169,7 +207,7 @@ function whyEmpty(d, supplier) {
   return null;
 }
 
-function clearCache() { _cache = null; _cacheTime = 0; }
+function clearCache() { _cache = null; _cacheTime = 0; _usedSheet = null; }
 
 module.exports = { catalogFor, loadPriceList, needsFullBlank, fullBlankSuppliers,
-  priceListSource, diagnose, whyEmpty, supKey, artKey, clearCache };
+  priceListSource, diagnose, whyEmpty, sameSupplier, sheetTitles, supKey, artKey, clearCache };
