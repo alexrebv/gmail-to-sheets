@@ -5,12 +5,12 @@
 
 const https = require('https');
 
-async function sendMessage(token, chatId, text, threadId = null, waitMs = 5000) {
-  const payload = {
-    chat_id: chatId,
-    text,
-    parse_mode: 'Markdown',
-  };
+// parseMode = null - отправить как есть, без разметки. Нужно там, где в текст
+// попадают чужие названия: один «_» в имени листа («Приход_Расход») ломает
+// разбор Markdown, и Telegram отвечает «Can't find end of the entity».
+async function sendMessage(token, chatId, text, threadId = null, waitMs = 5000, parseMode = 'Markdown') {
+  const payload = { chat_id: chatId, text };
+  if (parseMode) payload.parse_mode = parseMode;
 
   // threadId передаём если это число > 0
   const tid = parseInt(threadId);
