@@ -12,6 +12,7 @@ const path    = require('path');
 const os      = require('os');
 const https   = require('https');
 const ExcelJS = require('exceljs');
+const pricelist = require('./pricelist');
 
 // ── Парсинг HTML ──────────────────────────────────────────────────────────────
 
@@ -108,7 +109,12 @@ function colLetter(n) {
  * @param {Array}  orders — [{object, orderNumber, orderDate, deliveryDate, items, total}]
  * @returns {string} путь к временному файлу
  */
-async function buildSupplierExcel(supplier, orders) {
+/**
+ * @param {Array} catalog — ассортимент поставщика из прайса. Задан: в бланк
+ *   идут все его позиции в порядке прайса, даже незаказанные (пустая клетка).
+ *   Не задан: как раньше, только то, что заказали.
+ */
+async function buildSupplierExcel(supplier, orders, catalog) {
   // ── Дата для имени листа — из первого заказа (дата доставки или заказа) ──
   const dateLabel = (orders[0].deliveryDate || orders[0].orderDate || '')
     .replace(/\//g, '.').replace(/:/g, '-').trim();
@@ -127,23 +133,50 @@ async function buildSupplierExcel(supplier, orders) {
     }
   }
 
-  // ── Собираем все уникальные продукты (по артикулу) ───────────────────────
-  const productMap = new Map(); // article → {desc, pack}
+  // ── Собираем все уникальные продукты ─────────────────────────────────────
+  // Ключ позиции - артикул без ведущих нулей: в письме «033», в прайсе «33».
+  // Если артикула нет ни там, ни там - сводим по названию.
+  const artKey = a => String(a == null ? '' : a).trim().replace(/^0+/, '');
+  const nameKey = d => String(d == null ? '' : d).toLowerCase().replace(/\s+/g, ' ').trim();
+  const productMap = new Map();   // ключ → {desc, article, pack}
+  const byName = new Map();       // название → тот же ключ
+
+  const put = (article, desc, pack) => {
+    const k = artKey(article) || nameKey(desc);
+    if (!productMap.has(k)) productMap.set(k, { desc, article, pack });
+    const n = nameKey(desc);
+    if (n && !byName.has(n)) byName.set(n, k);
+    return k;
+  };
+  // Позиция из письма ищется по артикулу, а если такого в прайсе нет - по
+  // названию: строка прайса без кода поставщика иначе задвоила бы товар.
+  const find = (article, desc) => {
+    const k = artKey(article);
+    if (k && productMap.has(k)) return k;
+    const n = nameKey(desc);
+    if (n && byName.has(n)) return byName.get(n);
+    return k || n;
+  };
+
+  // Полный бланк: сначала весь прайс, в его порядке. Названия и фасовку берём
+  // оттуда же - тогда бланк от раза к разу выглядит одинаково.
+  for (const c of (catalog || [])) put(c.article, c.desc, c.pack);
+  // Заказанное, чего в прайсе не нашлось, дописываем следом: потерять реальный
+  // заказ из-за неполного прайса нельзя.
   for (const o of orders) {
     for (const it of o.items) {
-      if (!productMap.has(it.article)) {
-        productMap.set(it.article, { desc: it.desc, pack: it.pack });
-      }
+      if (!productMap.has(find(it.article, it.desc))) put(it.article, it.desc, it.pack);
     }
   }
 
-  // ── Пивот: article → object → qty ────────────────────────────────────────
+  // ── Пивот: позиция → объект → кол-во ─────────────────────────────────────
   const pivot = new Map();
   for (const o of orders) {
     for (const it of o.items) {
-      if (!pivot.has(it.article)) pivot.set(it.article, new Map());
-      const cur = pivot.get(it.article).get(o.object) || 0;
-      pivot.get(it.article).set(o.object, cur + it.qty);
+      const k = find(it.article, it.desc);
+      if (!pivot.has(k)) pivot.set(k, new Map());
+      const cur = pivot.get(k).get(o.object) || 0;
+      pivot.get(k).set(o.object, cur + it.qty);
     }
   }
   const articles = [...productMap.keys()];
@@ -181,10 +214,9 @@ async function buildSupplierExcel(supplier, orders) {
     const prod = productMap.get(art);
     const rowN = dataStartRow + ai;
     const objQtys = objectsOrdered.map(obj => pivot.get(art)?.get(obj) || null);
-    const lastCol  = colLetter(totalCols);
     const firstObjCol = colLetter(4);
 
-    const rowValues = [prod.desc, art, prod.pack, ...objQtys, { formula: `SUM(${firstObjCol}${rowN}:${colLetter(3 + objectsOrdered.length)}${rowN})` }];
+    const rowValues = [prod.desc, prod.article, prod.pack, ...objQtys, { formula: `SUM(${firstObjCol}${rowN}:${colLetter(3 + objectsOrdered.length)}${rowN})` }];
     const ri = ws.addRow(rowValues);
     for (let i = 1; i <= totalCols; i++) {
       const c = ri.getCell(i);
@@ -446,7 +478,19 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
         continue;
       }
 
-      const filePath   = await buildSupplierExcel(supplier, allOrders);
+      // Полный бланк - только тем поставщикам, кто в FULL_BLANK_SUPPLIERS.
+      // Прайс не прочитался - шлём как раньше, по заказанному: лучше бланк без
+      // пустых строк, чем несделанная отправка.
+      let catalog = null;
+      if (pricelist.needsFullBlank(supplier, cfg)) {
+        catalog = await pricelist.catalogFor(supplier, cfg);
+        if (!catalog.length) {
+          console.error(`[orderExcel] ${supplier}: полный бланк заказан, но в прайсе позиций не нашлось`);
+          catalog = null;
+        }
+      }
+
+      const filePath   = await buildSupplierExcel(supplier, allOrders, catalog);
       const totalItems = allOrders.reduce((s, o) => s + o.items.length, 0);
 
       let caption = `${supplier}\nЗаказов: ${allOrders.length} | Позиций: ${totalItems}\n${now}`;
@@ -466,4 +510,4 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
   }
 }
 
-module.exports = { parseOrderItems, parseDeliveryDate, sendOrderExcelReports };
+module.exports = { parseOrderItems, parseDeliveryDate, sendOrderExcelReports, buildSupplierExcel };
