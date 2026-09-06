@@ -196,9 +196,11 @@ async function diagnose(supplier, cfg) {
 
 // Человеческим языком: что не так с прайсом. null - всё в порядке.
 function whyEmpty(d, supplier) {
-  const book = d.ownId ? 'основной таблицы' : 'таблицы ' + String(d.spreadsheetId).slice(0, 8) + '…';
-  if (d.error) return `прайс не прочитался в ${book}: ${d.error}`;
-  const where = `лист «${d.usedSheet || d.sheet}» ${book}`;
+  // Два падежа: «лист X основной таблицы», но «не прочитался в основной таблице».
+  const of = d.ownId ? 'основной таблицы' : 'таблицы ' + String(d.spreadsheetId).slice(0, 8) + '…';
+  const inBook = d.ownId ? 'основной таблице' : 'таблице ' + String(d.spreadsheetId).slice(0, 8) + '…';
+  if (d.error) return `прайс не прочитался в ${inBook}: ${d.error}`;
+  const where = `лист «${d.usedSheet || d.sheet}» ${of}`;
   if (!d.rows) return `в прайсе нет строк (${where}) - проверьте, что в колонке A поставщик, в D товар у поставщика`;
   if (!d.mine) {
     const list = d.suppliers.slice(0, 8).join(', ');

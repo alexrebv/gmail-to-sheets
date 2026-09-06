@@ -659,13 +659,14 @@ async function sendPriceListReport(chatId, threadId, arg, cfg) {
     const target = tryId ? (wanted[0] || '') : (arg || wanted[0] || '');
     const d = await pricelist.diagnose(target, use);
 
-    // sendMessage шлёт с parse_mode Markdown - размечаем звёздочками.
+    // Шлём без разметки: в отчёт попадают чужие названия - имена листов и
+    // поставщиков, - а один «_» в «Приход_Расход» ломает разбор Markdown.
     const lines = [
-      '*Прайс для полного бланка*',
+      'ПРАЙС ДЛЯ ПОЛНОГО БЛАНКА',
       tryId ? `Проверяю таблицу из команды: ${tryId.slice(0, 12)}…`
             : `Таблица: ${d.spreadsheetId ? d.spreadsheetId.slice(0, 12) + '…' : 'не задана'}${d.ownId ? ' (основная)' : ' (задана отдельно)'}`,
       `Лист: ${d.usedSheet || d.sheet}${d.usedSheet && d.usedSheet !== d.sheet ? ` (искали «${d.sheet}», взяли похожий)` : ''}`,
-      `Строк в прайсе: *${d.rows}*`,
+      `Строк в прайсе: ${d.rows}`,
       // В настройках пишут кусок названия - так задумано, поэтому и говорим
       // «кто содержит», а не «кто равен».
       `Полный бланк положен тем, в чьём названии есть: ${wanted.join(', ') || '—'}`,
@@ -678,7 +679,7 @@ async function sendPriceListReport(chatId, threadId, arg, cfg) {
       if (d.titles.length > 25) lines.push(`…и ещё ${d.titles.length - 25}`);
     }
     if (target) {
-      lines.push(`\nИщем «${target}» — нашлось позиций: *${d.mine}*`);
+      lines.push(`\nИщем «${target}» — нашлось позиций: ${d.mine}`);
       if (d.matched.length) lines.push(`В прайсе он записан как: ${d.matched.join(', ')}`);
       const why = pricelist.whyEmpty(d, target);
       if (why) lines.push(`❌ ${why}`);
@@ -686,9 +687,9 @@ async function sendPriceListReport(chatId, threadId, arg, cfg) {
       // Проверяли чужую таблицу и всё сошлось - подсказываем, что закрепить.
       if (tryId && !why) {
         lines.push(`\nЧтобы закрепить, добавьте на лист «Настройки»:`);
-        lines.push('`PRICELIST_SPREADSHEET_ID`  →  `' + tryId + '`');
+        lines.push(`PRICELIST_SPREADSHEET_ID  →  ${tryId}`);
         if (d.usedSheet && d.usedSheet !== 'PriceList') {
-          lines.push('`SHEET_PRICELIST`  →  `' + d.usedSheet + '`');
+          lines.push(`SHEET_PRICELIST  →  ${d.usedSheet}`);
         }
       }
     }
@@ -697,10 +698,19 @@ async function sendPriceListReport(chatId, threadId, arg, cfg) {
       lines.push(d.suppliers.slice(0, 20).map(x => '• ' + x).join('\n'));
       if (d.suppliers.length > 20) lines.push(`…и ещё ${d.suppliers.length - 20}`);
     }
-    await sendMessage(token, chatId, lines.join('\n'), threadId, 0);
+    // Поставщиков и листов может быть много - режем по границе строк.
+    let chunk = '';
+    for (const line of lines) {
+      if (chunk.length + line.length > 3800) {
+        await sendMessage(token, chatId, chunk, threadId, 0, null);
+        chunk = '';
+      }
+      chunk += (chunk ? '\n' : '') + line;
+    }
+    if (chunk.trim()) await sendMessage(token, chatId, chunk, threadId, 0, null);
   } catch (e) {
     console.error('[channelBot] /pricelist:', e.message);
-    await sendMessage(token, chatId, `Не удалось проверить прайс: ${e.message}`, threadId, 0);
+    await sendMessage(token, chatId, `Не удалось проверить прайс: ${e.message}`, threadId, 0, null);
   }
 }
 
@@ -720,4 +730,6 @@ async function startChannelBot() {
   }
 }
 
-module.exports = { startChannelBot, parseChannelMessage, sendTodayOrders, sendEndOfDayReport };
+module.exports = { startChannelBot, parseChannelMessage, sendTodayOrders, sendEndOfDayReport,
+  // Наружу - только для проверки отчёта по прайсу без Telegram.
+  __test_sendPriceListReport: sendPriceListReport };
