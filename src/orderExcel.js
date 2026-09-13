@@ -498,7 +498,13 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
       const totalItems = allOrders.reduce((s, o) => s + o.items.length, 0);
 
       let caption = `${supplier}\nЗаказов: ${allOrders.length} | Позиций: ${totalItems}\n${now}`;
-      if (catalog) caption += `\nБланк полный: позиций в прайсе ${catalog.length}`;
+      // Откуда прайс - в подписи: источников теперь два, база приложения и
+      // таблица, и по числу позиций не понять, какой сработал.
+      if (catalog) {
+        caption += `\nБланк полный: позиций в прайсе ${catalog.length}`;
+        const src = pricelist.lastSource();
+        if (src) caption += ` (${src})`;
+      }
       if (!isFirstBatch && newObjects.length > 0) {
         caption += `\n⚠️ Добавился объект: ${newObjects.join(', ')}`;
       }
