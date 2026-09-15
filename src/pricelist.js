@@ -116,6 +116,15 @@ async function sheetTitles(spreadsheetId) {
 // названию: «Прайс», «Прайс-лист», «PriceList», «Цены».
 const PRICE_SHEET = /^\s*(прайс|price\s*list|pricelist|цены)/i;
 
+// Цена из ячейки таблицы: запятая как дробная часть, пробелы-разделители
+// тысяч. Пусто и мусор - это null, а не ноль: ноль соврал бы в сумме заказа.
+function priceOf(v) {
+  const t = String(v == null ? '' : v).replace(/\u00a0/g, ' ').replace(/\s+/g, '').replace(',', '.');
+  if (!t) return null;
+  const n = Number(t);
+  return isFinite(n) && n >= 0 ? n : null;
+}
+
 // Какой источник просили. «база» / «db» - только база, «таблица» / «sheet» -
 // только таблица, пусто - сначала база, потом таблица.
 function wantSource(cfg) {
@@ -165,7 +174,8 @@ async function loadFromDb() {
                       coalesce(btrim(our_name), '')  AS our_name,
                       coalesce(pack_factor, 1)       AS pack_factor,
                       coalesce(btrim(order_unit_raw), '')   AS order_unit,
-                      coalesce(btrim(measure_unit_raw), '') AS measure_unit
+                      coalesce(btrim(measure_unit_raw), '') AS measure_unit,
+                      price                          AS price
                  FROM uchet.price
                 ORDER BY 1, 2`;
   const p = uchetPool();
@@ -187,6 +197,8 @@ async function loadFromDb() {
       packFactor: Number(r.pack_factor) || 1,
       orderUnit: r.order_unit,
       measureUnit: r.measure_unit,
+      // Цена за единицу заказа: «Заказывают в: Упаковка» - значит за упаковку.
+      price: r.price == null ? null : Number(r.price),
     });
   }
   if (!rows.length) { _dbNote = 'в базе прайс пустой'; return null; }
@@ -239,7 +251,7 @@ async function loadPriceList(cfg) {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `'${sheet}'!A2:F5000`,
+    range: `'${sheet}'!A2:G5000`,
   });
 
   const rows = [];
@@ -252,6 +264,8 @@ async function loadPriceList(cfg) {
       article: String((r && r[4]) || '').trim(),
       desc,
       pack: String((r && r[5]) || '').trim(),
+      // G - «Цена с НДС, р.». В таблице её пишут и с запятой.
+      price: priceOf(r && r[6]),
     });
   }
   _cache = rows;
@@ -279,7 +293,8 @@ async function catalogFor(supplier, cfg) {
     const key = artKey(r.article) || r.desc.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ article: r.article, desc: r.desc, pack: r.pack });
+    out.push({ article: r.article, desc: r.desc, pack: r.pack,
+               price: r.price == null ? null : Number(r.price) });
   }
   return out;
 }
