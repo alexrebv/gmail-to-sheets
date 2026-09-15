@@ -12,6 +12,7 @@ const path    = require('path');
 const os      = require('os');
 const https   = require('https');
 const ExcelJS = require('exceljs');
+const BM = require('./blank-money');
 const pricelist = require('./pricelist');
 
 // ── Парсинг HTML ──────────────────────────────────────────────────────────────
@@ -115,6 +116,9 @@ function colLetter(n) {
  *   Не задан: как раньше, только то, что заказали.
  */
 async function buildSupplierExcel(supplier, orders, catalog) {
+  // Цена приходит вместе с ассортиментом прайса. Позиция, дописанная из письма
+  // (в прайсе её нет), остаётся без цены - и в сумму не попадёт.
+  const priceOf = prod => (prod && prod.price != null ? Number(prod.price) : null);
   // ── Дата для имени листа — из первого заказа (дата доставки или заказа) ──
   const dateLabel = (orders[0].deliveryDate || orders[0].orderDate || '')
     .replace(/\//g, '.').replace(/:/g, '-').trim();
@@ -141,9 +145,9 @@ async function buildSupplierExcel(supplier, orders, catalog) {
   const productMap = new Map();   // ключ → {desc, article, pack}
   const byName = new Map();       // название → тот же ключ
 
-  const put = (article, desc, pack) => {
+  const put = (article, desc, pack, price) => {
     const k = artKey(article) || nameKey(desc);
-    if (!productMap.has(k)) productMap.set(k, { desc, article, pack });
+    if (!productMap.has(k)) productMap.set(k, { desc, article, pack, price: price == null ? null : price });
     const n = nameKey(desc);
     if (n && !byName.has(n)) byName.set(n, k);
     return k;
@@ -160,7 +164,7 @@ async function buildSupplierExcel(supplier, orders, catalog) {
 
   // Полный бланк: сначала весь прайс, в его порядке. Названия и фасовку берём
   // оттуда же - тогда бланк от раза к разу выглядит одинаково.
-  for (const c of (catalog || [])) put(c.article, c.desc, c.pack);
+  for (const c of (catalog || [])) put(c.article, c.desc, c.pack, c.price);
   // Заказанное, чего в прайсе не нашлось, дописываем следом: потерять реальный
   // заказ из-за неполного прайса нельзя.
   for (const o of orders) {
@@ -182,18 +186,20 @@ async function buildSupplierExcel(supplier, orders, catalog) {
   const articles = [...productMap.keys()];
 
   // ── Ширины столбцов ───────────────────────────────────────────────────────
-  // A=Название, B=Артикул, C=Фасовка, D..=объекты, last=Итого
-  const totalCols = 3 + objectsOrdered.length + 1;
+  // A=Название, B=Артикул, C=Фасовка, D=Цена, E..=объекты, last=Итого
+  const totalCols = BM.totalCols(objectsOrdered.length);
   ws.getColumn(1).width = 36;
   ws.getColumn(2).width = 18;
   ws.getColumn(3).width = 32;
-  for (let i = 4; i <= totalCols; i++) ws.getColumn(i).width = 14;
+  ws.getColumn(BM.PRICE_COL).width = BM.PRICE_WIDTH;
+  for (let i = BM.FIRST_OBJ_COL; i <= totalCols; i++) ws.getColumn(i).width = 14;
 
   // ── Строка 1: заголовок ───────────────────────────────────────────────────
   const headerValues = [
     `${supplier} - ${dateLabel}`,
     'Артикул',
     'Фасовка',
+    BM.PRICE_HEAD,
     ...objectsOrdered,
     'Итого',
   ];
@@ -214,24 +220,26 @@ async function buildSupplierExcel(supplier, orders, catalog) {
     const prod = productMap.get(art);
     const rowN = dataStartRow + ai;
     const objQtys = objectsOrdered.map(obj => pivot.get(art)?.get(obj) || null);
-    const firstObjCol = colLetter(4);
+    const { first: firstObjCol, last: lastObjCol } = BM.objRange(objectsOrdered.length);
 
-    const rowValues = [prod.desc, prod.article, prod.pack, ...objQtys, { formula: `SUM(${firstObjCol}${rowN}:${colLetter(3 + objectsOrdered.length)}${rowN})` }];
+    const rowValues = [prod.desc, prod.article, prod.pack, priceOf(prod), ...objQtys,
+                       { formula: `SUM(${firstObjCol}${rowN}:${lastObjCol}${rowN})` }];
     const ri = ws.addRow(rowValues);
     for (let i = 1; i <= totalCols; i++) {
       const c = ri.getCell(i);
       c.border = thinBorder();
       c.font   = { name: 'Calibri', size: 10 };
-      if (i >= 4) {
+      if (i >= BM.PRICE_COL) {
         c.alignment = { horizontal: 'center', vertical: 'middle' };
       }
     }
+    ri.getCell(BM.PRICE_COL).numFmt = BM.MONEY_FMT;
   }
 
   // ── Строка итогов ────────────────────────────────────────────────────────
   const totalRowN = dataStartRow + articles.length;
-  const totalValues = ['Итого', null, null];
-  for (let ci = 4; ci <= totalCols; ci++) {
+  const totalValues = ['Итого', null, null, null];
+  for (let ci = BM.FIRST_OBJ_COL; ci <= totalCols; ci++) {
     const col = colLetter(ci);
     totalValues.push({ formula: `SUM(${col}${dataStartRow}:${col}${totalRowN - 1})` });
   }
@@ -242,7 +250,25 @@ async function buildSupplierExcel(supplier, orders, catalog) {
     c.fill   = TOTAL_FILL;
     c.font   = { bold: true, name: 'Calibri', size: 10 };
     c.border = thinBorder();
-    if (i >= 4) c.alignment = { horizontal: 'center', vertical: 'middle' };
+    if (i >= BM.PRICE_COL) c.alignment = { horizontal: 'center', vertical: 'middle' };
+  }
+
+  // ── Сумма заказа ─────────────────────────────────────────────────────────
+  // Формулой, а не числом: количества в бланке правят руками, и сумма должна
+  // пересчитываться сама.
+  ws.addRow([]);
+  const sumRowN = ws.rowCount + 1;
+  const rs = ws.addRow(BM.sumRowValues(objectsOrdered.length, dataStartRow, totalRowN - 1, sumRowN));
+  rs.height = 18;
+  for (let i = 1; i <= totalCols; i++) {
+    const c = rs.getCell(i);
+    c.fill   = TOTAL_FILL;
+    c.font   = { bold: true, name: 'Calibri', size: 10 };
+    c.border = thinBorder();
+    if (i >= BM.FIRST_OBJ_COL) {
+      c.alignment = { horizontal: 'center', vertical: 'middle' };
+      c.numFmt = BM.MONEY_FMT;
+    }
   }
 
   const now      = _todayKey();
