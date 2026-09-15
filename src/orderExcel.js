@@ -166,10 +166,22 @@ async function buildSupplierExcel(supplier, orders, catalog) {
   // оттуда же - тогда бланк от раза к разу выглядит одинаково.
   for (const c of (catalog || [])) put(c.article, c.desc, c.pack, c.price);
   // Заказанное, чего в прайсе не нашлось, дописываем следом: потерять реальный
-  // заказ из-за неполного прайса нельзя.
+  // заказ из-за неполного прайса нельзя. Цену берём из самого письма - iiko
+  // присылает её в строке заказа, и для позиции вне прайса это единственная
+  // цена, какая есть.
   for (const o of orders) {
     for (const it of o.items) {
-      if (!productMap.has(find(it.article, it.desc))) put(it.article, it.desc, it.pack);
+      if (!productMap.has(find(it.article, it.desc))) put(it.article, it.desc, it.pack, it.price);
+    }
+  }
+  // Позиция в прайсе есть, а цены у неё там нет - тоже берём из письма:
+  // пустая клетка в колонке «Цена» не говорит ничего, а цена из заказа верна
+  // хотя бы для этого заказа.
+  for (const o of orders) {
+    for (const it of o.items) {
+      if (it.price == null) continue;
+      const prod = productMap.get(find(it.article, it.desc));
+      if (prod && prod.price == null) prod.price = Number(it.price);
     }
   }
 
@@ -535,6 +547,14 @@ async function _sendOrderExcelReports(parsedOrders, cfg) {
         caption += `\n⚠️ Добавился объект: ${newObjects.join(', ')}`;
       }
       if (priceNote) caption += `\n⚠️ Полный бланк не собран: ${priceNote}`;
+      // Пустая колонка «Цена» без объяснения хуже всего: по бланку не понять,
+      // цен нет в прайсе или их не нашли. Считаем и то, и другое.
+      const pricedRows = (catalog || []).filter(c => c.price != null).length
+        + allOrders.reduce((n, o) => n + o.items.filter(it => it.price != null).length, 0);
+      if (!pricedRows) {
+        caption += '\n⚠️ Цена не нашлась ни по одной позиции - сумма заказа не посчитана.'
+          + ' Проверьте прайс этого поставщика: залит ли он и заполнена ли колонка «Цена с НДС, р.»';
+      }
 
       const resp = await sendDocument(token, chatId, threadId, filePath, caption);
       logTgResponse(supplier, resp);
