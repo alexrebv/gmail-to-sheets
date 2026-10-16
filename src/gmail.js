@@ -315,6 +315,83 @@ async function getOrCreateLabel(gmail, labelName) {
   return created.data.id;
 }
 
+// ── Лимит Gmail API ───────────────────────────────────────────────────────────
+// Gmail считает запросы за минуту на пользователя. Раньше прогон читал все
+// новые письма подряд и помечал их только в самом конце: упёрся в лимит на
+// середине - не помечено ни одно, и следующий прогон начинал ту же пачку
+// заново, снова упирался, и так без конца. Теперь письма идут частями: часть
+// прочитали - записали в «Отправлен» - пометили. Упёрлись в лимит - ждём, пока
+// минутное окно освободится, и продолжаем с того же места.
+
+// Писем за один заход: прочитали, записали, пометили.
+const CHUNK = 50;
+// Сколько ждать после «Quota exceeded»: лимит минутный, берём с запасом.
+const QUOTA_PAUSE_MS = 65 * 1000;
+// Дольше этого один прогон не тянем: остаток дочитает следующий.
+const RUN_BUDGET_MS = 10 * 60 * 1000;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function isQuotaError(e) {
+  const status = e?.response?.status ?? e?.code;
+  const reasons = (e?.errors || e?.response?.data?.error?.errors || []).map(x => x?.reason || '').join(' ');
+  return status === 429 || status === '429' ||
+    /rateLimitExceeded|userRateLimitExceeded|quotaExceeded/i.test(reasons) ||
+    /quota exceeded|rate limit/i.test(String(e?.message || ''));
+}
+
+// Все письма по запросу, от старых к новым: при разборе хвоста первыми
+// уходят те заказы, что ждут дольше.
+async function listMessageIds(gmail, query) {
+  const ids = [];
+  let pageToken;
+  do {
+    const res = await gmail.users.messages.list({
+      userId: 'me', q: query, maxResults: 500, pageToken,
+    });
+    ids.push(...(res.data.messages || []).map(m => m.id));
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+  return ids.reverse();
+}
+
+// Читает письма по очереди. На лимите останавливается и отдаёт прочитанное:
+// quota=true. Письмо, которое не прочиталось по другой причине, пропускаем -
+// его подберёт следующий прогон.
+async function fetchMessages(gmail, ids, tag) {
+  const msgs = [];
+  let tried = 0;
+  for (const id of ids) {
+    try {
+      const res = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+      msgs.push({ id, msg: res.data });
+    } catch (e) {
+      if (isQuotaError(e)) return { msgs, tried, quota: true };
+      console.error(`${tag} письмо ${id} не прочиталось: ${e.message}`);
+    }
+    tried++;
+  }
+  return { msgs, tried, quota: false };
+}
+
+// Одна метка на много писем - один запрос. На лимите ждём и повторяем:
+// строки уже в таблице, и непомеченные письма прочитались бы ещё раз.
+async function addLabel(gmail, ids, labelId) {
+  if (!ids.length) return;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await gmail.users.messages.batchModify({
+        userId: 'me', requestBody: { ids, addLabelIds: [labelId] },
+      });
+      return;
+    } catch (e) {
+      if (!isQuotaError(e) || attempt >= 3) throw e;
+      console.warn(`[gmail] лимит Gmail при пометке писем, жду ${QUOTA_PAUSE_MS / 1000} с`);
+      await sleep(QUOTA_PAUSE_MS);
+    }
+  }
+}
+
 async function processGmailOrders() {
   try {
     const cfg = await getConfig();
@@ -332,25 +409,15 @@ async function processGmailOrders() {
     const query = `${SEARCH_QUERY_BASE} after:${AFTER_DATE} -label:${LABEL_NAME}`;
     console.log(`Поиск писем: ${query}`);
 
-    const messageIds = [];
-    let pageToken;
-    do {
-      const res = await gmail.users.messages.list({
-        userId: 'me', q: query, maxResults: 100, pageToken,
-      });
-      const msgs = res.data.messages || [];
-      messageIds.push(...msgs.map(m => m.id));
-      pageToken = res.data.nextPageToken;
-    } while (pageToken);
-
+    const messageIds = await listMessageIds(gmail, query);
     console.log(`Найдено писем: ${messageIds.length}`);
     if (messageIds.length === 0) { console.log('Нет новых писем.'); return; }
 
-    const newRows = [];
-    const processedIds = [];
-    const minimalkaRows = []; // строки для листа Минималка
-    const orderExcelData = []; // данные для Excel-отчётов по поставщикам
-    const orderEmailIds  = []; // id писем у которых распарсились позиции (для лейбла GO)
+    const HEADERS = [
+      'Дата письма', 'Объект', 'Номер заказа', 'Дата заказа',
+      'Поставщик', 'Дата отправки', 'Юр.лицо', 'Направлено', 'Тело письма',
+    ];
+    await ensureSheetExists(SHEET_NAME, HEADERS);
 
     const [supplierMins, dist, loginsList] = await Promise.all([
       getSupplierMinimums(cfg).catch(() => new Map()),
@@ -358,151 +425,192 @@ async function processGmailOrders() {
       getLogins(cfg).catch(() => []),
     ]);
 
-    for (const id of messageIds) {
-      const res = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
-      const msg     = res.data;
-      const headers = msg.payload?.headers || [];
-
-      const dateHeader = headers.find(h => h.name === 'Date')?.value || '';
-      const subject    = headers.find(h => h.name === 'Subject')?.value || '';
-      const emailDate  = dateHeader ? new Date(dateHeader) : new Date(parseInt(msg.internalDate));
-
-      const htmlBody  = extractByMime(msg.payload, 'text/html');
-      const plainBody = extractByMime(msg.payload, 'text/plain');
-
-      console.log(`[gmail] htmlBody length: ${htmlBody.length}, hasQP: ${htmlBody.includes('=3D') || htmlBody.includes('=D0')}, sample: ${htmlBody.substring(0, 80).replace(/\n/g,' ')}`);
-
-      const { object, orderNumber, orderDate } = parseSubject(subject);
-      const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
-      const total    = extractOrderTotal(htmlBody);
-
-      newRows.push([
-        emailDate,         // A — Дата письма
-        object || subject, // B — Объект (без ФГ)
-        orderNumber,       // C — Номер заказа
-        orderDate,         // D — Дата заказа
-        supplier,          // E — Поставщик
-        emailDate,         // F — Дата отправки
-        '',                // G — Юр.лицо
-        '',                // H — Направлено
-        '',                // I — Тело (убрали HTML-мусор)
-      ]);
-
-      // Проверка минималки
-      if (supplier && total !== null) {
-        const minAmount = findSupplierMin(supplier, supplierMins);
-        if (minAmount !== null) {
-          const totalStr = total.toString().replace('.', ',');
-          minimalkaRows.push({
-            emailDate, object: object || subject, orderNumber, orderDate,
-            supplier, total, totalStr, minAmount,
-          });
-        }
-      }
-
-      // Сбор позиций для Excel-отчёта
-      const items        = parseOrderItems(htmlBody);
-      const deliveryDate = parseDeliveryDate(htmlBody);
-      console.log(`[gmail] parseOrderItems: ${items.length} items, deliveryDate: ${deliveryDate}`);
-      if (items.length > 0) {
-        orderExcelData.push({
-          supplier: supplier || '',
-          object:   object || subject,
-          orderNumber, orderDate,
-          deliveryDate, items, total,
-        });
-        orderEmailIds.push(id);
-      }
-
-      processedIds.push(id);
-      console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}${total !== null ? ` | сумма: ${total}` : ''}${items.length > 0 ? ` | позиций: ${items.length}` : ''}`);
-    }
-
-    const HEADERS = [
-      'Дата письма', 'Объект', 'Номер заказа', 'Дата заказа',
-      'Поставщик', 'Дата отправки', 'Юр.лицо', 'Направлено', 'Тело письма',
-    ];
-    await ensureSheetExists(SHEET_NAME, HEADERS);
-    await appendRowsToSheet(SHEET_NAME, newRows);
-
-    // ── Лейблим письма сразу после записи в "Отправлен" — до отправки в Telegram
-    // (Excel-отчёт, уведомления о минималке) и до записи в "Позиции". Если процесс
-    // упадёт/перезапустится дальше — письма уже помечены и не найдутся повторно
-    // поиском (-label:${LABEL_NAME}), то есть не будет дублирующей отправки xlsx
-    // в общий чат при следующем запуске. Риск сдвигается в другую сторону (письмо
-    // помечено, но Excel/Позиции не записались) — это восстанавливается вручную
-    // через backfillPositions() в index.js, а не требует чистки чата от дублей.
-    for (const id of processedIds) {
-      const addLabelIds = [labelId];
-      if (orderEmailIds.includes(id)) addLabelIds.push(goLabelId);
-      await gmail.users.messages.modify({
-        userId: 'me', id,
-        requestBody: { addLabelIds },
-      });
-    }
-    console.log(`Помечено писем лейблом "${LABEL_NAME}": ${processedIds.length}, лейблом "GO": ${orderEmailIds.length}`);
-
-    // ── Обработка Минималки ──────────────────────────────────────────────────
-    if (minimalkaRows.length > 0) {
-      const MSHEET  = cfg.SHEET_MINIMALKA || 'Минималка';
-      const MHEADERS = ['Дата письма', 'Объект', 'Номер заказа', 'Дата заказа', 'Поставщик', 'Дата отправки', 'Сумма итог', 'Статус'];
-      await ensureSheetExists(MSHEET, MHEADERS);
-
-      const mRows = minimalkaRows.map(r => [
-        r.emailDate, r.object, r.orderNumber, r.orderDate,
-        r.supplier, r.emailDate, r.totalStr, 'обработан',
-      ]);
-      await appendRowsToSheet(MSHEET, mRows);
-
-      // Уведомления по накладным ниже минималки
-      const token    = cfg.TELEGRAM_TOKEN;
-      const chatId   = cfg.TELEGRAM_CHAT_ID;
-      const threadId = cfg.TELEGRAM_THREAD_ID || null;
-
-      if (token && chatId) {
-        for (const r of minimalkaRows) {
-          if (r.total < r.minAmount) {
-            const minStr = r.minAmount.toString().replace('.', ',');
-
-            // Ищем управляющего (Upr, столбец C) или ТУ (столбец B) для объекта
-            const distRow = dist.find(d => d.object === r.object);
-            let tagStr = '';
-            if (distRow) {
-              const uprTag = distRow.upr ? findTagByName(distRow.upr, loginsList) : '';
-              const tuTag  = distRow.tu  ? findTagByName(distRow.tu,  loginsList) : '';
-              const tag    = uprTag || tuTag;
-              if (tag) tagStr = `@${tag} `;
-            }
-
-            const text = `${tagStr}${r.object}\n${r.supplier}\nСумма: ${r.totalStr}\n\nМинималка не набрана\nНужно ${minStr}`;
-            await tgPostGmail(token, chatId, threadId, text).catch(e =>
-              console.error(`[gmail] Telegram notify error: ${e.message}`)
-            );
-            console.log(`[gmail] Минималка не набрана: ${r.object} | ${r.supplier} | ${r.total} < ${r.minAmount}`);
-          }
-        }
-      }
-    }
-    console.log(`Записано строк: ${newRows.length}`);
-
-    // ── Excel-отчёты по поставщикам + запись в лист Позиции ─────────────────
-    // writeOrderItemsToSheet сам дедуплицирует по номеру заказа (overwrite=false
-    // по умолчанию), так что дублей при параллельных запусках с reprocessTodayOrders
-    // не будет — та функция явно исключает уже помеченные GO письма (-label:GO).
-    if (orderExcelData.length > 0) {
-      await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
-        console.error(`[gmail] orderExcel error: ${e.message}`)
+    // Минималка, Excel-бланки и «Позиции» копятся за весь прогон и уходят
+    // одним разом в конце - как и раньше, один бланк поставщику, а не по
+    // бланку на каждую часть. Перед паузой на лимите - отправляем накопленное,
+    // чтобы помеченные письма не ждали минуту без бланка.
+    const pending = { minimalka: [], orders: [] };
+    const flush = async () => {
+      const { minimalka, orders } = pending;
+      pending.minimalka = []; pending.orders = [];
+      await sendMinimalka(minimalka, cfg, dist, loginsList).catch(e =>
+        console.error(`[gmail] Минималка: ${e.message}`)
       );
-      await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
-        console.error(`[gmail] orderSheet error: ${e.message}`)
-      );
+      await sendOrders(orders, cfg);
+    };
+
+    const started = Date.now();
+    let done = 0, written = 0;
+    // Упали на середине - помеченное всё равно получает бланк и минималку.
+    try {
+      while (done < messageIds.length) {
+        const chunk = messageIds.slice(done, done + CHUNK);
+        const got = await fetchMessages(gmail, chunk, '[gmail]');
+        done += got.tried;
+
+        if (got.msgs.length) {
+          const part = parseChunk(got.msgs, supplierMins);
+          await appendRowsToSheet(SHEET_NAME, part.rows);
+          written += part.rows.length;
+          // Лейблим письма сразу после записи в "Отправлен" — до отправки в
+          // Telegram (Excel-отчёт, уведомления о минималке) и до записи в
+          // "Позиции". Если процесс упадёт/перезапустится дальше — письма уже
+          // помечены и не найдутся повторно поиском (-label:${LABEL_NAME}), то
+          // есть не будет дублирующей отправки xlsx в общий чат. Риск сдвигается
+          // в другую сторону (письмо помечено, но Excel/Позиции не записались) —
+          // это восстанавливается через backfillPositions() в index.js.
+          await addLabel(gmail, part.ids, labelId);
+          pending.minimalka.push(...part.minimalka);
+          pending.orders.push(...part.orders);
+          // GO не встал - письмо подберёт reprocessTodayOrders (Transfer без GO).
+          await addLabel(gmail, part.goIds, goLabelId);
+          console.log(`Помечено писем лейблом "${LABEL_NAME}": ${part.ids.length}, лейблом "GO": ${part.goIds.length} (${done} из ${messageIds.length})`);
+        }
+
+        if (!got.quota) continue;
+        await flush();
+        const left = messageIds.length - done;
+        if (Date.now() - started + QUOTA_PAUSE_MS > RUN_BUDGET_MS) {
+          console.warn(`[gmail] лимит Gmail: осталось ${left} писем, дочитаю в следующий прогон`);
+          break;
+        }
+        console.warn(`[gmail] лимит Gmail: осталось ${left} писем, жду ${QUOTA_PAUSE_MS / 1000} с и продолжаю`);
+        await sleep(QUOTA_PAUSE_MS);
+      }
+    } finally {
+      await flush();
     }
+    console.log(`Записано строк: ${written}`);
 
   } catch (err) {
     console.error(`[processGmailOrders] Ошибка: ${err.message}`);
     if (err.stack) console.error(err.stack);
   }
 }
+
+// Разбор прочитанных писем: строки «Отправлен», минималка, позиции для бланка.
+function parseChunk(msgs, supplierMins) {
+  const out = { rows: [], ids: [], goIds: [], minimalka: [], orders: [] };
+  for (const { id, msg } of msgs) {
+    const headers = msg.payload?.headers || [];
+
+    const dateHeader = headers.find(h => h.name === 'Date')?.value || '';
+    const subject    = headers.find(h => h.name === 'Subject')?.value || '';
+    const emailDate  = dateHeader ? new Date(dateHeader) : new Date(parseInt(msg.internalDate));
+
+    const htmlBody  = extractByMime(msg.payload, 'text/html');
+    const plainBody = extractByMime(msg.payload, 'text/plain');
+
+    console.log(`[gmail] htmlBody length: ${htmlBody.length}, hasQP: ${htmlBody.includes('=3D') || htmlBody.includes('=D0')}, sample: ${htmlBody.substring(0, 80).replace(/\n/g,' ')}`);
+
+    const { object, orderNumber, orderDate } = parseSubject(subject);
+    const supplier = extractSupplierFromHtml(htmlBody) || extractSupplierFromPlain(plainBody);
+    const total    = extractOrderTotal(htmlBody);
+
+    out.rows.push([
+      emailDate,         // A — Дата письма
+      object || subject, // B — Объект (без ФГ)
+      orderNumber,       // C — Номер заказа
+      orderDate,         // D — Дата заказа
+      supplier,          // E — Поставщик
+      emailDate,         // F — Дата отправки
+      '',                // G — Юр.лицо
+      '',                // H — Направлено
+      '',                // I — Тело (убрали HTML-мусор)
+    ]);
+
+    // Проверка минималки
+    if (supplier && total !== null) {
+      const minAmount = findSupplierMin(supplier, supplierMins);
+      if (minAmount !== null) {
+        const totalStr = total.toString().replace('.', ',');
+        out.minimalka.push({
+          emailDate, object: object || subject, orderNumber, orderDate,
+          supplier, total, totalStr, minAmount,
+        });
+      }
+    }
+
+    // Сбор позиций для Excel-отчёта
+    const items        = parseOrderItems(htmlBody);
+    const deliveryDate = parseDeliveryDate(htmlBody);
+    console.log(`[gmail] parseOrderItems: ${items.length} items, deliveryDate: ${deliveryDate}`);
+    if (items.length > 0) {
+      out.orders.push({
+        supplier: supplier || '',
+        object:   object || subject,
+        orderNumber, orderDate,
+        deliveryDate, items, total,
+      });
+      out.goIds.push(id);
+    }
+
+    out.ids.push(id);
+    console.log(`  ✓ ${object} | ${orderNumber} | ${supplier}${total !== null ? ` | сумма: ${total}` : ''}${items.length > 0 ? ` | позиций: ${items.length}` : ''}`);
+  }
+  return out;
+}
+
+// ── Обработка Минималки ──────────────────────────────────────────────────────
+async function sendMinimalka(minimalkaRows, cfg, dist, loginsList) {
+  if (minimalkaRows.length > 0) {
+    const MSHEET  = cfg.SHEET_MINIMALKA || 'Минималка';
+    const MHEADERS = ['Дата письма', 'Объект', 'Номер заказа', 'Дата заказа', 'Поставщик', 'Дата отправки', 'Сумма итог', 'Статус'];
+    await ensureSheetExists(MSHEET, MHEADERS);
+
+    const mRows = minimalkaRows.map(r => [
+      r.emailDate, r.object, r.orderNumber, r.orderDate,
+      r.supplier, r.emailDate, r.totalStr, 'обработан',
+    ]);
+    await appendRowsToSheet(MSHEET, mRows);
+
+    // Уведомления по накладным ниже минималки
+    const token    = cfg.TELEGRAM_TOKEN;
+    const chatId   = cfg.TELEGRAM_CHAT_ID;
+    const threadId = cfg.TELEGRAM_THREAD_ID || null;
+
+    if (token && chatId) {
+      for (const r of minimalkaRows) {
+        if (r.total < r.minAmount) {
+          const minStr = r.minAmount.toString().replace('.', ',');
+
+          // Ищем управляющего (Upr, столбец C) или ТУ (столбец B) для объекта
+          const distRow = dist.find(d => d.object === r.object);
+          let tagStr = '';
+          if (distRow) {
+            const uprTag = distRow.upr ? findTagByName(distRow.upr, loginsList) : '';
+            const tuTag  = distRow.tu  ? findTagByName(distRow.tu,  loginsList) : '';
+            const tag    = uprTag || tuTag;
+            if (tag) tagStr = `@${tag} `;
+          }
+
+          const text = `${tagStr}${r.object}\n${r.supplier}\nСумма: ${r.totalStr}\n\nМинималка не набрана\nНужно ${minStr}`;
+          await tgPostGmail(token, chatId, threadId, text).catch(e =>
+            console.error(`[gmail] Telegram notify error: ${e.message}`)
+          );
+          console.log(`[gmail] Минималка не набрана: ${r.object} | ${r.supplier} | ${r.total} < ${r.minAmount}`);
+        }
+      }
+    }
+  }
+}
+
+// ── Excel-отчёты по поставщикам + запись в лист Позиции ─────────────────────
+// writeOrderItemsToSheet сам дедуплицирует по номеру заказа (overwrite=false
+// по умолчанию), так что дублей при параллельных запусках с reprocessTodayOrders
+// не будет — та функция явно исключает уже помеченные GO письма (-label:GO).
+async function sendOrders(orderExcelData, cfg) {
+  if (orderExcelData.length === 0) return;
+  await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
+    console.error(`[gmail] orderExcel error: ${e.message}`)
+  );
+  await writeOrderItemsToSheet(orderExcelData, cfg).catch(e =>
+    console.error(`[gmail] orderSheet error: ${e.message}`)
+  );
+}
+
+// Сегодняшние письма, в которых позиций не нашлось (см. reprocessTodayOrders).
+const _noItems = { day: '', ids: new Set() };
 
 /**
  * Ищет сегодняшние письма с лейблом Transfer но без GO.
@@ -528,26 +636,25 @@ async function reprocessTodayOrders() {
     const query = `label:${LABEL_NAME} -label:GO after:${todayStr}`;
     console.log(`[reprocess] Поиск сегодняшних без GO: ${query}`);
 
-    const messageIds = [];
-    let pageToken;
-    do {
-      const res = await gmail.users.messages.list({
-        userId: 'me', q: query, maxResults: 100, pageToken,
-      });
-      messageIds.push(...(res.data.messages || []).map(m => m.id));
-      pageToken = res.data.nextPageToken;
-    } while (pageToken);
+    // Письмо не меняется: без позиций сегодня - без позиций и через 5 минут.
+    // Такие не перечитываем до перезапуска (после выкладки разборщик мог
+    // поменяться - тогда стоит прочитать ещё раз), иначе каждые 5 минут
+    // тратили бы на них лимит Gmail весь день.
+    if (_noItems.day !== todayStr) { _noItems.day = todayStr; _noItems.ids.clear(); }
+    const found = await listMessageIds(gmail, query);
+    const messageIds = found.filter(id => !_noItems.ids.has(id));
 
-    console.log(`[reprocess] Найдено без GO: ${messageIds.length}`);
+    console.log(`[reprocess] Найдено без GO: ${found.length}` +
+      (found.length > messageIds.length ? `, из них уже проверены без позиций: ${found.length - messageIds.length}` : ''));
     if (messageIds.length === 0) return;
 
+    const got = await fetchMessages(gmail, messageIds, '[reprocess]');
+    if (got.quota) console.warn(`[reprocess] лимит Gmail: прочитано ${got.msgs.length} из ${messageIds.length}, остальные - в следующий раз`);
 
     const orderExcelData = [];
     const goIds = [];
 
-    for (const id of messageIds) {
-      const res  = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
-      const msg  = res.data;
+    for (const { id, msg } of got.msgs) {
       const headers = msg.payload?.headers || [];
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
 
@@ -571,6 +678,8 @@ async function reprocessTodayOrders() {
       if (items.length > 0) {
         orderExcelData.push({ supplier, object, orderNumber, orderDate, deliveryDate, items, total });
         goIds.push(id);
+      } else {
+        _noItems.ids.add(id);
       }
     }
 
@@ -584,12 +693,8 @@ async function reprocessTodayOrders() {
     // между отправкой и лейблом, письмо уже помечено и не найдётся повторно
     // этим же запросом (-label:GO), то есть не будет дублирующей отправки xlsx
     // в общий чат при следующем запуске.
-    for (const id of goIds) {
-      await gmail.users.messages.modify({
-        userId: 'me', id,
-        requestBody: { addLabelIds: [goLabelId] },
-      }).catch(e => console.error(`[reprocess] label GO error: ${e.message}`));
-    }
+    await addLabel(gmail, goIds, goLabelId)
+      .catch(e => console.error(`[reprocess] label GO error: ${e.message}`));
     console.log(`[reprocess] GO поставлен на ${goIds.length} писем`);
 
     await sendOrderExcelReports(orderExcelData, cfg).catch(e =>
